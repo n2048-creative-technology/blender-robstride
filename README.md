@@ -66,7 +66,7 @@ Open View3D > Sidebar (N) > RobStride.
   - Online/Offline: current node status
   - Object: link a Blender object to this node
   - Mode: Run or Learn
-  - Parameters: Kp, Ki, Kd (defaults 1, 0, 0), Scale, Offset
+  - Parameters: Kp, Ki, Kd (defaults 1, 0, 0), Scale, Offset, Min Z, Max Z (radians)
 
 Run vs Learn Behavior
 - Run Mode
@@ -140,4 +140,3 @@ Troubleshooting
 - No simulated nodes: Ensure “Show Simulated Nodes” is enabled, then Connect or Scan.
 - No hardware nodes: Confirm Channel/Baudrate, click Connect, then Scan.
 - Deps missing: Use the Install Deps button or run `bash scripts/setup_deps.sh` to populate vendor/.
-

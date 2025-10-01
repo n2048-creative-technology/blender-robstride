@@ -81,6 +81,16 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
         description="Offset for conversion",
         default=0.0,
     )
+    min_rot: FloatProperty(
+        name="Min Z",
+        description="Minimum allowed Z rotation (radians)",
+        default=-6.283185307179586,
+    )
+    max_rot: FloatProperty(
+        name="Max Z",
+        description="Maximum allowed Z rotation (radians)",
+        default=6.283185307179586,
+    )
 
 
 class ROBSTRIDE_OT_scan(bpy.types.Operator):
@@ -227,6 +237,8 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
                 "kd": float(node.kd),
                 "scale": float(node.scale),
                 "offset": float(node.offset),
+                "min": float(node.min_rot),
+                "max": float(node.max_rot),
             })
 
         try:
@@ -286,6 +298,8 @@ class ROBSTRIDE_OT_load_config(bpy.types.Operator):
             n.kd = float(m.get("kd", 0.0))
             n.scale = float(m.get("scale", 1.0))
             n.offset = float(m.get("offset", 0.0))
+            n.min_rot = float(m.get("min", -6.283185307179586))
+            n.max_rot = float(m.get("max", 6.283185307179586))
 
         self.report({'INFO'}, f"Loaded config: {self.filepath}")
         return {'FINISHED'}
@@ -371,6 +385,8 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             grid.prop(node, "kd")
             grid.prop(node, "scale")
             grid.prop(node, "offset")
+            grid.prop(node, "min_rot")
+            grid.prop(node, "max_rot")
 
 
 # Cache last-sent parameters to reduce bus traffic
@@ -444,6 +460,15 @@ def robstride_sync_handler(scene):
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
             z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])
+            # Clamp to configured bounds if valid
+            try:
+                if node.min_rot < node.max_rot:
+                    if z_rad < node.min_rot:
+                        z_rad = node.min_rot
+                    elif z_rad > node.max_rot:
+                        z_rad = node.max_rot
+            except Exception:
+                pass
             node_units = node.scale * z_rad + node.offset
 
             last = _last_out.get(node_id)
@@ -464,6 +489,15 @@ def robstride_sync_handler(scene):
 
             # node units -> radians
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            # Clamp to configured bounds if valid
+            try:
+                if node.min_rot < node.max_rot:
+                    if z_rad < node.min_rot:
+                        z_rad = node.min_rot
+                    elif z_rad > node.max_rot:
+                        z_rad = node.max_rot
+            except Exception:
+                pass
             obj.rotation_euler[2] = z_rad
 
             # Ensure incoming encoder value overrides any existing key at this frame
