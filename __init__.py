@@ -4,7 +4,7 @@ bl_info = {
     "version": (0, 1, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > RobStride",
-    "description": "Scan RobStride motors over CAN, link to objects, and sync rotations in Run/Learn modes.",
+    "description": "Scan RobStride nodes over CAN, link to objects, and sync rotations in Run/Learn modes.",
     "category": "System",
 }
 
@@ -56,14 +56,14 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "bitrate")
 
 
-class RobStrideMotorNode(bpy.types.PropertyGroup):
-    name: StringProperty(name="Name", default="Motor")
-    motor_id: IntProperty(name="ID", default=0, min=0)
+class RobStridenodeNode(bpy.types.PropertyGroup):
+    name: StringProperty(name="Name", default="Node")
+    node_id: IntProperty(name="ID", default=0, min=0)
     object_ref: PointerProperty(name="Object", type=bpy.types.Object)
     mode: EnumProperty(
         name="Mode",
         items=[
-            ("RUN", "Run", "Send object Z rotation to motor"),
+            ("RUN", "Run", "Send object Z rotation to node"),
             ("LEARN", "Learn", "Read encoder and keyframe object Z"),
         ],
         default="RUN",
@@ -73,7 +73,7 @@ class RobStrideMotorNode(bpy.types.PropertyGroup):
     kd: FloatProperty(name="Kd", default=0.0)
     scale: FloatProperty(
         name="Scale",
-        description="Multiplier to convert radians <-> motor units",
+        description="Multiplier to convert radians <-> node units",
         default=1.0,
     )
     offset: FloatProperty(
@@ -85,8 +85,8 @@ class RobStrideMotorNode(bpy.types.PropertyGroup):
 
 class ROBSTRIDE_OT_scan(bpy.types.Operator):
     bl_idname = "robstride.scan"
-    bl_label = "Scan RobStride Motors"
-    bl_description = "Find motors on the configured CAN bus and populate nodes"
+    bl_label = "Scan RobStride Nodes"
+    bl_description = "Find nodes on the configured CAN bus and populate nodes"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -110,26 +110,26 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
 
         # Remove nodes that are no longer present
         found_ids = {int(m.get("id", 0)) for m in found}
-        remove_indices = [i for i, n in enumerate(nodes) if n.motor_id not in found_ids]
+        remove_indices = [i for i, n in enumerate(nodes) if n.node_id not in found_ids]
         for i in reversed(remove_indices):
             nodes.remove(i)
 
         # Build a map of existing nodes by ID (after removals)
-        existing = {n.motor_id: n for n in nodes}
+        existing = {n.node_id: n for n in nodes}
 
         # Update or add nodes
         for m in found:
             m_id = int(m.get("id", 0))
-            m_name = str(m.get("name", f"Motor {m_id}"))
+            m_name = str(m.get("name", f"node {m_id}"))
             if m_id in existing:
                 # Keep user-customized name; do not overwrite
                 n = existing[m_id]
             else:
                 n = nodes.add()
                 n.name = m_name
-                n.motor_id = m_id
+                n.node_id = m_id
 
-        self.report({'INFO'}, f"Found {len(found)} motors")
+        self.report({'INFO'}, f"Found {len(found)} nodes")
         return {'FINISHED'}
 
 
@@ -166,21 +166,21 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
         nodes = scene.robstride_nodes
 
         # Do not remove on connect; only add/update
-        existing = {n.motor_id: n for n in nodes}
+        existing = {n.node_id: n for n in nodes}
         for m in found:
             m_id = int(m.get("id", 0))
-            m_name = str(m.get("name", f"Motor {m_id}"))
+            m_name = str(m.get("name", f"node {m_id}"))
             if m_id in existing:
                 # Keep user-defined name
                 pass
             else:
                 n = nodes.add()
                 n.name = m_name
-                n.motor_id = m_id
+                n.node_id = m_id
 
         # Prepare canopen nodes where applicable
         for n in nodes:
-            robstride_can.manager.prepare_node(n.motor_id)
+            robstride_can.manager.prepare_node(n.node_id)
 
         self.report({'INFO'}, "Connected and prepared nodes")
         return {'FINISHED'}
@@ -189,7 +189,7 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
 class ROBSTRIDE_OT_save_config(bpy.types.Operator):
     bl_idname = "robstride.save_config"
     bl_label = "Save Config"
-    bl_description = "Save CAN and motor node configuration to a JSON file"
+    bl_description = "Save CAN and node node configuration to a JSON file"
     bl_options = {"REGISTER"}
 
     filepath: StringProperty(subtype='FILE_PATH')
@@ -213,12 +213,12 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
                 "channel": prefs.channel,
                 "bitrate": int(prefs.bitrate),
             },
-            "motors": [],
+            "nodes": [],
         }
 
         for node in scene.robstride_nodes:
-            data["motors"].append({
-                "id": int(node.motor_id),
+            data["nodes"].append({
+                "id": int(node.node_id),
                 "name": node.name,
                 "object": node.object_ref.name if node.object_ref else "",
                 "mode": node.mode,
@@ -243,7 +243,7 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
 class ROBSTRIDE_OT_load_config(bpy.types.Operator):
     bl_idname = "robstride.load_config"
     bl_label = "Load Config"
-    bl_description = "Load CAN and motor node configuration from a JSON file"
+    bl_description = "Load CAN and node node configuration from a JSON file"
     bl_options = {"REGISTER"}
 
     filepath: StringProperty(subtype='FILE_PATH')
@@ -273,10 +273,10 @@ class ROBSTRIDE_OT_load_config(bpy.types.Operator):
         nodes = scene.robstride_nodes
         nodes.clear()
 
-        for m in data.get("motors", []):
+        for m in data.get("nodes", []):
             n = nodes.add()
-            n.motor_id = int(m.get("id", 0))
-            n.name = str(m.get("name", f"Motor {n.motor_id}"))
+            n.node_id = int(m.get("id", 0))
+            n.name = str(m.get("name", f"node {n.node_id}"))
             obj_name = str(m.get("object", ""))
             n.object_ref = bpy.data.objects.get(obj_name) if obj_name else None
             mode = str(m.get("mode", "RUN"))
@@ -349,16 +349,16 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             row.operator("robstride.install_deps", icon='IMPORT', text="Install Deps")
 
         if len(scene.robstride_nodes) == 0:
-            layout.label(text="No motors. Click Scan.")
+            layout.label(text="No nodes. Click Scan.")
             return
 
         for idx, node in enumerate(scene.robstride_nodes):
             box = layout.box()
             header = box.row(align=True)
             header.prop(node, "name", text="Name")
-            online = robstride_can.manager.node_status(node.motor_id)
+            online = robstride_can.manager.node_status(node.node_id)
             online_icon = 'CHECKMARK' if online else 'ERROR'
-            header.label(text=f"ID {node.motor_id}", icon='DRIVER')
+            header.label(text=f"ID {node.node_id}", icon='DRIVER')
             header.label(text=("Online" if online else "Offline"), icon=online_icon)
 
             col = box.column(align=True)
@@ -379,7 +379,7 @@ _last_out = {}
 
 
 def _send_pid_if_changed(node):
-    key = node.motor_id
+    key = node.node_id
     last = _last_pid.get(key)
     current = (node.kp, node.ki, node.kd)
     if last != current:
@@ -431,7 +431,7 @@ def robstride_sync_handler(scene):
             continue
 
         obj = node.object_ref
-        motor_id = node.motor_id
+        node_id = node.node_id
 
         # Skip if not connected and not simulating
         if not (robstride_can.manager.is_connected() or scene.robstride_simulate):
@@ -444,25 +444,25 @@ def robstride_sync_handler(scene):
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
             z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])
-            motor_units = node.scale * z_rad + node.offset
+            node_units = node.scale * z_rad + node.offset
 
-            last = _last_out.get(motor_id)
-            if last is None or abs(last - motor_units) > 1e-6:
+            last = _last_out.get(node_id)
+            if last is None or abs(last - node_units) > 1e-6:
                 try:
-                    robstride_can.manager.enable_motor(motor_id, True)
-                    robstride_can.manager.send_position(motor_id, motor_units)
-                    _last_out[motor_id] = motor_units
+                    robstride_can.manager.enable_node(node_id, True)
+                    robstride_can.manager.send_position(node_id, node_units)
+                    _last_out[node_id] = node_units
                 except Exception:
                     pass
 
         elif node.mode == 'LEARN':
             try:
-                robstride_can.manager.enable_motor(motor_id, False)
-                pos = robstride_can.manager.read_position(motor_id)
+                robstride_can.manager.enable_node(node_id, False)
+                pos = robstride_can.manager.read_position(node_id)
             except Exception:
                 continue
 
-            # Motor units -> radians
+            # node units -> radians
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
             obj.rotation_euler[2] = z_rad
 
@@ -472,7 +472,7 @@ def robstride_sync_handler(scene):
 
 classes = (
     RobStrideAddonPreferences,
-    RobStrideMotorNode,
+    RobStridenodeNode,
     ROBSTRIDE_OT_scan,
     ROBSTRIDE_OT_save_config,
     ROBSTRIDE_OT_load_config,
@@ -485,10 +485,10 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
-    bpy.types.Scene.robstride_nodes = CollectionProperty(type=RobStrideMotorNode)
+    bpy.types.Scene.robstride_nodes = CollectionProperty(type=RobStridenodeNode)
     bpy.types.Scene.robstride_simulate = BoolProperty(
         name="Simulate",
-        description="When enabled, show and use simulated motors instead of requiring real hardware",
+        description="When enabled, show and use simulated nodes instead of requiring real hardware",
         default=False,
     )
 

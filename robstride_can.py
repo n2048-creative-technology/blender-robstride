@@ -2,7 +2,7 @@
 RobStride CAN manager abstraction.
 
 This module provides a small interface used by the add-on to talk to
-RobStride motors. It tries to use python-can if available, but also
+RobStride nodes. It tries to use python-can if available, but also
 exposes a stub implementation for development/testing without hardware.
 """
 
@@ -49,8 +49,8 @@ class RobStrideManager:
     def scan(self) -> List[Dict[str, Any]]:
         if self.simulate:
             return [
-                {"id": 1, "name": "Sim Motor 1"},
-                {"id": 2, "name": "Sim Motor 2"},
+                {"id": 1, "name": "Sim node 1"},
+                {"id": 2, "name": "Sim node 2"},
             ]
 
         if not self.connected:
@@ -60,10 +60,10 @@ class RobStrideManager:
             # If an official library exists, prefer it (placeholder usage)
             # Expectation: robstride_lib.scan(interface, channel, bitrate) -> list of dicts
             try:
-                motors = robstride_lib.scan(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
+                nodes = robstride_lib.scan(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
                 return [
-                    {"id": int(m.get("id", 0)), "name": str(m.get("name", f"Motor {m.get('id', 0)}"))}
-                    for m in motors
+                    {"id": int(m.get("id", 0)), "name": str(m.get("name", f"node {m.get('id', 0)}"))}
+                    for m in nodes
                 ]
             except Exception:
                 pass
@@ -83,11 +83,11 @@ class RobStrideManager:
         # No simulation and no real backend available
         return []
 
-        # TODO: Actual discovery logic for RobStride motors over CAN.
+        # TODO: Actual discovery logic for RobStride nodes over CAN.
         # For now, return an empty list to avoid making assumptions.
         return []
 
-    def set_pid(self, motor_id: int, kp: float, ki: float, kd: float) -> None:
+    def set_pid(self, node_id: int, kp: float, ki: float, kd: float) -> None:
         if self.simulate:
             # No-op in simulation for now
             return
@@ -97,14 +97,14 @@ class RobStrideManager:
 
         if robstride_lib is not None:
             try:
-                robstride_lib.set_pid(motor_id, kp, ki, kd)
+                robstride_lib.set_pid(node_id, kp, ki, kd)
                 return
             except Exception:
                 pass
 
         if self._co_net is not None and canopen is not None:
             try:
-                node = self._get_or_add_node(motor_id)
+                node = self._get_or_add_node(node_id)
                 # Placeholder vendor-specific indices; replace with RobStride spec
                 # Example indices: 0x3000: Kp, 0x3001: Ki, 0x3002: Kd (subindex 0)
                 import struct
@@ -119,7 +119,7 @@ class RobStrideManager:
         return
         # TODO: send PID configuration message per protocol
 
-    def enable_motor(self, motor_id: int, enable: bool) -> None:
+    def enable_node(self, node_id: int, enable: bool) -> None:
         if self.simulate:
             # No-op in simulation; enable/disable ignored
             return
@@ -129,14 +129,14 @@ class RobStrideManager:
 
         if robstride_lib is not None:
             try:
-                robstride_lib.enable(motor_id, enable)
+                robstride_lib.enable(node_id, enable)
                 return
             except Exception:
                 pass
 
         if self._co_net is not None and canopen is not None:
             try:
-                node = self._get_or_add_node(motor_id)
+                node = self._get_or_add_node(node_id)
                 # CiA 402 controlword to enable/disable operation
                 import struct
                 if enable:
@@ -154,10 +154,10 @@ class RobStrideManager:
         return
         # TODO: send enable/disable command per protocol
 
-    def send_position(self, motor_id: int, value: float) -> None:
+    def send_position(self, node_id: int, value: float) -> None:
         if self.simulate:
             # Remember last output so reads can reflect it
-            self._stub_last[motor_id] = float(value)
+            self._stub_last[node_id] = float(value)
             return
 
         if not self.connected:
@@ -165,14 +165,14 @@ class RobStrideManager:
 
         if robstride_lib is not None:
             try:
-                robstride_lib.set_position(motor_id, float(value))
+                robstride_lib.set_position(node_id, float(value))
                 return
             except Exception:
                 pass
 
         if self._co_net is not None and canopen is not None:
             try:
-                node = self._get_or_add_node(motor_id)
+                node = self._get_or_add_node(node_id)
                 import struct
                 # Switch to Profile Position mode (1)
                 node.sdo.download(0x6060, 0x00, struct.pack('<b', 1))
@@ -198,9 +198,9 @@ class RobStrideManager:
         return
         # TODO: encode and send target position frame
 
-    def read_position(self, motor_id: int) -> float:
+    def read_position(self, node_id: int) -> float:
         if self.simulate:
-            base = self._stub_last.get(motor_id, 0.0)
+            base = self._stub_last.get(node_id, 0.0)
             self._stub_phase += 0.1
             return base + 0.1 * math.sin(self._stub_phase)
 
@@ -209,13 +209,13 @@ class RobStrideManager:
 
         if robstride_lib is not None:
             try:
-                return float(robstride_lib.get_position(motor_id))
+                return float(robstride_lib.get_position(node_id))
             except Exception:
                 pass
 
         if self._co_net is not None and canopen is not None:
             try:
-                node = self._get_or_add_node(motor_id)
+                node = self._get_or_add_node(node_id)
                 pos_bytes = node.sdo.upload(0x6064, 0x00)
                 # 32-bit signed position
                 return int.from_bytes(pos_bytes, 'little', signed=True)
