@@ -25,7 +25,6 @@ try:
 except Exception:  # pragma: no cover - optional
     robstride_lib = None  # type: ignore
 
-
 class RobStrideManager:
     def __init__(self):
         self.interface = "socketcan"
