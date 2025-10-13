@@ -494,18 +494,14 @@ def robstride_sync_handler(scene):
                 pass
             node_units = node.scale * z_rad + node.offset
 
-            try:
-                robstride_can.manager.enable_node(node_id, True)
-                robstride_can.manager.send_position(node_id, node_units)
-                _last_out[node_id] = node_units
-            except Exception:
-                pass
+            # Non-blocking: enqueue position for background worker
+            robstride_can.manager.post_position(node_id, node_units)
 
         elif node.mode == 'LEARN':
-            try:
-                robstride_can.manager.enable_node(node_id, False)
-                pos = robstride_can.manager.read_position(node_id)
-            except Exception:
+            # Non-blocking: request a read and use last cached value if available
+            robstride_can.manager.request_read(node_id)
+            pos = robstride_can.manager.get_cached_position(node_id)
+            if pos is None:
                 continue
 
             # node units -> radians

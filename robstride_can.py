@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 import time
 from typing import Any, Dict, List
+import threading
+import queue
 
 try:
     import can  # type: ignore
@@ -40,6 +42,13 @@ class RobStrideManager:
         self._rs_client = None
         self._enabled_nodes = set()
         self._pos_mode_nodes = set()
+        # Async worker state
+        self._worker_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._pending_pos: Dict[int, float] = {}
+        self._pending_reads: set[int] = set()
+        self._last_read_pos: Dict[int, float] = {}
+        self._lock = threading.Lock()
 
     # Public API used by the add-on
     def configure(self, interface: str, channel: str, bitrate: int) -> None:
@@ -251,6 +260,8 @@ class RobStrideManager:
             self.connected = (self._co_net is not None) or (self._bus is not None)
         except Exception:
             self.connected = False
+        if self.connected:
+            self._start_worker()
         return self.connected
 
     def disconnect(self) -> None:
@@ -266,6 +277,7 @@ class RobStrideManager:
         self._rs_client = None
         self._enabled_nodes.clear()
         self._pos_mode_nodes.clear()
+        self._stop_worker()
 
     def is_connected(self) -> bool:
         # Real connection state (simulation handled separately by UI)
@@ -287,6 +299,125 @@ class RobStrideManager:
         if self.simulate:
             return True
         return False
+
+    # --- Async API for Blender handler ---
+    def post_position(self, node_id: int, value: float) -> None:
+        if self.simulate and not self.connected:
+            with self._lock:
+                self._stub_last[node_id] = float(value)
+            return
+        with self._lock:
+            self._pending_pos[node_id] = float(value)
+
+    def request_read(self, node_id: int) -> None:
+        if self.simulate and not self.connected:
+            # synthesize position
+            with self._lock:
+                base = self._stub_last.get(node_id, 0.0)
+                self._stub_phase += 0.1
+                self._last_read_pos[node_id] = base + 0.1 * math.sin(self._stub_phase)
+            return
+        with self._lock:
+            self._pending_reads.add(int(node_id))
+
+    def get_cached_position(self, node_id: int) -> float | None:
+        with self._lock:
+            return self._last_read_pos.get(int(node_id))
+
+    # --- Worker management ---
+    def _start_worker(self) -> None:
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._worker_thread = threading.Thread(target=self._worker_loop, name="robstride-can-worker", daemon=True)
+        self._worker_thread.start()
+
+    def _stop_worker(self) -> None:
+        self._stop_event.set()
+        t = self._worker_thread
+        if t and t.is_alive():
+            try:
+                t.join(timeout=0.5)
+            except Exception:
+                pass
+        self._worker_thread = None
+
+    def _worker_loop(self) -> None:
+        # Process pending position updates and read requests with minimal blocking
+        while not self._stop_event.is_set():
+            # Snapshot pending work
+            with self._lock:
+                pos_items = list(self._pending_pos.items())
+                self._pending_pos.clear()
+                read_ids = list(self._pending_reads)
+                self._pending_reads.clear()
+
+            # Send positions
+            for node_id, value in pos_items:
+                try:
+                    # Ensure enabled and in Position mode
+                    if self.connected and self._rs_client is not None and robstride_lib is not None:
+                        if node_id not in self._enabled_nodes:
+                            try:
+                                self._rs_client.enable(node_id)
+                                self._enabled_nodes.add(node_id)
+                            except Exception:
+                                pass
+                        if node_id not in self._pos_mode_nodes:
+                            try:
+                                self._rs_client.write_param(node_id, 'run_mode', robstride_lib.RunMode.Position)
+                                self._pos_mode_nodes.add(node_id)
+                            except Exception:
+                                pass
+                        try:
+                            self._rs_client.write_param(node_id, 'loc_ref', float(value))
+                        except Exception:
+                            pass
+                    elif self.connected and self._co_net is not None and canopen is not None:
+                        try:
+                            node = self._get_or_add_node(node_id)
+                            import struct
+                            node.sdo.download(0x6060, 0x00, struct.pack('<b', 1))
+                            node.sdo.download(0x607A, 0x00, struct.pack('<i', int(value)))
+                        except Exception:
+                            pass
+                    else:
+                        # Offline simulate
+                        with self._lock:
+                            self._stub_last[node_id] = float(value)
+                except Exception:
+                    # Never crash the worker
+                    pass
+
+            # Perform reads
+            for node_id in read_ids:
+                try:
+                    if self.connected and self._rs_client is not None and robstride_lib is not None:
+                        try:
+                            angle = self._rs_client.read_param(node_id, 'mechpos')
+                            with self._lock:
+                                self._last_read_pos[node_id] = float(angle)
+                        except Exception:
+                            pass
+                    elif self.connected and self._co_net is not None and canopen is not None:
+                        try:
+                            node = self._get_or_add_node(node_id)
+                            pos_bytes = node.sdo.upload(0x6064, 0x00)
+                            val = int.from_bytes(pos_bytes, 'little', signed=True)
+                            with self._lock:
+                                self._last_read_pos[node_id] = float(val)
+                        except Exception:
+                            pass
+                    else:
+                        with self._lock:
+                            base = self._stub_last.get(node_id, 0.0)
+                            self._stub_phase += 0.1
+                            self._last_read_pos[node_id] = base + 0.1 * math.sin(self._stub_phase)
+                except Exception:
+                    pass
+
+            # Small sleep to yield CPU; adjust for throughput
+            time.sleep(0.002)
 
 
 # Singleton instance used by the add-on
