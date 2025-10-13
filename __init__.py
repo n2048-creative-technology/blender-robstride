@@ -109,9 +109,15 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             channel=prefs.channel,
             bitrate=prefs.bitrate,
         )
-        # Simulation flag from scene
-        sim = context.scene.robstride_simulate
-        robstride_can.manager.set_simulate(bool(sim))
+        # Simulation only when not connected; if connected, always query real network
+        sim_flag = bool(context.scene.robstride_simulate)
+        connected = robstride_can.manager.is_connected()
+        robstride_can.manager.set_simulate(False if connected else sim_flag)
+
+        # Require an active connection unless simulation is enabled and not connected
+        if not (connected or (not connected and sim_flag)):
+            self.report({'ERROR'}, "Not connected. Click Connect or enable 'Show Simulated Nodes'.")
+            return {'CANCELLED'}
 
         found = robstride_can.manager.scan()
 
@@ -508,6 +514,7 @@ classes = (
     RobStrideAddonPreferences,
     RobStridenodeNode,
     ROBSTRIDE_OT_scan,
+    ROBSTRIDE_OT_connect_toggle,
     ROBSTRIDE_OT_save_config,
     ROBSTRIDE_OT_load_config,
     ROBSTRIDE_OT_install_deps,
