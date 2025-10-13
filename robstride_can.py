@@ -234,7 +234,8 @@ class RobStrideManager:
         # Initialize RobStride client if a CAN bus is available
         if self._bus is not None and robstride_lib is not None:
             try:
-                self._rs_client = robstride_lib.Client(self._bus, retry_count=0, recv_timeout=0.1)
+                # Short timeout to keep worker responsive
+                self._rs_client = robstride_lib.Client(self._bus, retry_count=0, recv_timeout=0.01)
             except Exception:
                 self._rs_client = None
 

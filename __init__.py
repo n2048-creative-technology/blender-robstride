@@ -398,6 +398,7 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
 # Cache last-sent parameters to reduce bus traffic
 _last_pid = {}
 _last_out = {}
+_last_mode = {}
 
 
 def _send_pid_if_changed(node):
@@ -479,6 +480,18 @@ def robstride_sync_handler(scene):
         # Update PID if needed
         _send_pid_if_changed(node)
 
+        # Handle mode transitions for safe enable/disable
+        prev_mode = _last_mode.get(node_id)
+        if prev_mode != node.mode:
+            try:
+                if node.mode == 'LEARN':
+                    robstride_can.manager.enable_node(node_id, False)
+                elif node.mode == 'RUN':
+                    robstride_can.manager.enable_node(node_id, True)
+            except Exception:
+                pass
+            _last_mode[node_id] = node.mode
+
         if node.mode == 'RUN':
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
@@ -502,6 +515,7 @@ def robstride_sync_handler(scene):
             robstride_can.manager.request_read(node_id)
             pos = robstride_can.manager.get_cached_position(node_id)
             if pos is None:
+                # Skip this frame if not ready to avoid blocking and FPS drops
                 continue
 
             # node units -> radians
