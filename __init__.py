@@ -109,13 +109,13 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             channel=prefs.channel,
             bitrate=prefs.bitrate,
         )
-        # Simulation only when not connected; if connected, always query real network
+        # Respect simulation toggle even when connected (scan will merge sim + real)
         sim_flag = bool(context.scene.robstride_simulate)
         connected = robstride_can.manager.is_connected()
-        robstride_can.manager.set_simulate(False if connected else sim_flag)
+        robstride_can.manager.set_simulate(sim_flag)
 
-        # Require an active connection unless simulation is enabled and not connected
-        if not (connected or (not connected and sim_flag)):
+        # Require an active connection unless simulation is enabled
+        if not (connected or sim_flag):
             self.report({'ERROR'}, "Not connected. Click Connect or enable 'Show Simulated Nodes'.")
             return {'CANCELLED'}
 
@@ -441,12 +441,29 @@ def _get_anim_z_value(obj, frame):
     return None
 
 
+def _on_simulate_update(self, context):
+    # Keep manager's simulate flag in sync and ensure simulated nodes appear
+    try:
+        robstride_can.manager.set_simulate(bool(self.robstride_simulate))
+    except Exception:
+        pass
+    if getattr(self, 'robstride_simulate', False):
+        try:
+            nodes = self.robstride_nodes
+            existing = {n.node_id for n in nodes}
+            sim_defs = [(1, "Sim node 1"), (2, "Sim node 2")]
+            for nid, name in sim_defs:
+                if nid not in existing:
+                    n = nodes.add()
+                    n.node_id = nid
+                    n.name = name
+        except Exception:
+            pass
+
+
 @persistent
 def robstride_sync_handler(scene):
-    # Only operate while animation is playing to avoid unexpected bus traffic
-    screen = bpy.context.screen
-    if not screen or not screen.is_animation_playing:
-        return
+    # Run on every frame change; avoids relying on context.screen in handlers
 
     for node in scene.robstride_nodes:
         if not node.object_ref:
@@ -477,14 +494,12 @@ def robstride_sync_handler(scene):
                 pass
             node_units = node.scale * z_rad + node.offset
 
-            last = _last_out.get(node_id)
-            if last is None or abs(last - node_units) > 1e-6:
-                try:
-                    robstride_can.manager.enable_node(node_id, True)
-                    robstride_can.manager.send_position(node_id, node_units)
-                    _last_out[node_id] = node_units
-                except Exception:
-                    pass
+            try:
+                robstride_can.manager.enable_node(node_id, True)
+                robstride_can.manager.send_position(node_id, node_units)
+                _last_out[node_id] = node_units
+            except Exception:
+                pass
 
         elif node.mode == 'LEARN':
             try:
@@ -531,6 +546,7 @@ def register():
         name="Simulate",
         description="When enabled, show and use simulated nodes instead of requiring real hardware",
         default=False,
+        update=_on_simulate_update,
     )
 
     # Install handler
