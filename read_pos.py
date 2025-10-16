@@ -3,7 +3,7 @@ import can
 import robstride
 
 
-MID=127
+MID=0
 PI=3.14159265359
 
 def readPos(rs):

@@ -35,5 +35,6 @@ echo "Target ${deg}° → radians = ${rad} → LE bytes ${hexbytes}"
 
 # Send the loc_ref (target position) frame
 # ID 0x1200AA7F, payload: 16 70 00 00 <float32 rad (LE)>
-cansend can0 1200AA7F#16700000${hexbytes}
+#cansend can0 1200AA7F#16700000${hexbytes}
+cansend can0 1200AA00#16700000${hexbytes}
 

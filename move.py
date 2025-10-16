@@ -4,7 +4,7 @@ import robstride
 import math
 import random
 
-MID=127
+MID=0
 C=0
 
 def moveTo(rs, deg):
