@@ -1,5 +1,10 @@
 RobStride Blender Add-on
 
+```
+sudo ip link set can0 type can bitrate 1000000 loopback off
+sudo ip link set can0 up
+```
+
 RobStride is a Blender add-on that discovers RobStride nodes over CAN, links them to scene objects, and synchronizes motion in Run and Learn modes. It supports simulated nodes for offline work and can vendor Python dependencies for offline use inside Blender.
 
 Features

@@ -42,6 +42,12 @@ class RobStrideManager:
         self._rs_client = None
         self._enabled_nodes = set()
         self._pos_mode_nodes = set()
+        # Raw RobStride protocol addressing (from candump): host 0x7F, node_id is 1 byte
+        self._host_addr = 0x7F
+        # Scan options
+        self._scan_min_id = 1
+        self._scan_max_id = 127
+        self._scan_quick = True
         # Async worker state
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -62,26 +68,113 @@ class RobStrideManager:
         results: List[Dict[str, Any]] = []
         real_ids = set()
         if self.connected:
-            # Try official library first
+            # Try official library first (but verify each via raw read if possible)
+            vendor_candidates: List[int] = []
             if robstride_lib is not None:
                 try:
                     nodes = robstride_lib.scan(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
                     for m in nodes:
                         nid = int(m.get("id", 0))
-                        real_ids.add(nid)
-                        results.append({"id": nid, "name": str(m.get("name", f"node {nid}"))})
+                        if nid not in vendor_candidates:
+                            vendor_candidates.append(nid)
                 except Exception:
-                    pass
+                    vendor_candidates = []
 
             # Fallback to CANopen scanner
-            if self._co_net is not None and canopen is not None and not results:
+            if self._co_net is not None and canopen is not None and not vendor_candidates:
                 try:
                     self._co_net.scanner.search()
                     time.sleep(0.5)
                     for nid in list(self._co_net.scanner.nodes):
-                        nid = int(nid)
+                        vendor_candidates.append(int(nid))
+                except Exception:
+                    pass
+
+            # Verify candidates via raw read when possible
+            if vendor_candidates and self._bus is not None and can is not None:
+                try:                    
+                    self._flush_bus(0.05)
+                    for nid in vendor_candidates:
+                        try:
+                            expect_id = self._rs_make_id(0x11, self._host_addr, src=int(nid))
+                            try:
+                                self._bus.set_filters([
+                                    {"can_id": expect_id, "can_mask": 0x1FFFFFFF, "extended": True}
+                                ])
+                            except Exception:
+                                pass
+                            v1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.006)
+                            v2 = None
+                            if v1 is not None and not math.isnan(v1):
+                                v2 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.006)
+                            # Additional sanity: read run_mode (0x7005) as u32
+                            mode_val = None
+                            if (v1 is not None and not math.isnan(v1)):
+                                mode_val = self._rs_raw_read_param_u32(nid, 0x7005, timeout_s=0.004)
+                        except Exception:
+                            v1 = None
+                            v2 = None
+                            mode_val = None
+                        if (v1 is not None and not math.isnan(v1)) and (v2 is not None and not math.isnan(v2)) and (mode_val is not None and 0 <= int(mode_val) < 16):
+                            if nid not in real_ids:
+                                real_ids.add(nid)
+                                results.append({"id": nid, "name": f"Node {nid}"})
+                    try:
+                        self._bus.set_filters(None)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            elif vendor_candidates:
+                # No raw bus to verify; accept vendor results
+                for nid in vendor_candidates:
+                    if nid not in real_ids:
                         real_ids.add(nid)
                         results.append({"id": nid, "name": f"Node {nid}"})
+
+            # Raw protocol probe if we still have no results and a CAN bus is available
+            if self._bus is not None and can is not None and not results:
+                try:
+                    # Drain any pending frames to avoid matching stale responses
+                    self._flush_bus(0.05)
+                    # Probe a reasonable address range quickly using a short timeout per ID
+                    # Using mechpos (0x7019) read twice + run_mode read to verify presence
+                    min_id = max(1, int(self._scan_min_id))
+                    max_id = min(127, int(self._scan_max_id))
+                    if not self._scan_quick:
+                        probe_ids = range(min_id, max_id + 1)
+                    else:
+                        common = (1, 2, 10, 42, 100, 120, 127)
+                        probe_ids = [i for i in common if min_id <= i <= max_id]
+                    for nid in probe_ids:
+                        try:
+                            # Temporarily filter to the exact expected response ID to avoid noise
+                            expect_id = self._rs_make_id(0x11, self._host_addr, src=int(nid))
+                            try:
+                                self._bus.set_filters([
+                                    {"can_id": expect_id, "can_mask": 0x1FFFFFFF, "extended": True}
+                                ])
+                            except Exception:
+                                pass
+                            val1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.003)
+                            val2 = None
+                            if val1 is not None and not math.isnan(val1):
+                                val2 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.003)
+                            mode_val = None
+                            if val1 is not None and not math.isnan(val1):
+                                mode_val = self._rs_raw_read_param_u32(nid, 0x7005, timeout_s=0.003)
+                        except Exception:
+                            val1 = None
+                            val2 = None
+                            mode_val = None
+                        if (val1 is not None and not math.isnan(val1)) and (val2 is not None and not math.isnan(val2)) and (mode_val is not None and 0 <= int(mode_val) < 16):
+                            real_ids.add(nid)
+                            results.append({"id": nid, "name": f"Node {nid}"})
+                    # Clear filters
+                    try:
+                        self._bus.set_filters(None)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -96,6 +189,29 @@ class RobStrideManager:
                     results.append(m)
 
         return results
+
+    def set_scan_options(self, min_id: int | None = None, max_id: int | None = None, quick: bool | None = None) -> None:
+        if min_id is not None:
+            self._scan_min_id = max(1, int(min_id))
+        if max_id is not None:
+            self._scan_max_id = min(127, int(max_id))
+        if self._scan_max_id < self._scan_min_id:
+            self._scan_min_id, self._scan_max_id = self._scan_max_id, self._scan_min_id
+        if quick is not None:
+            self._scan_quick = bool(quick)
+
+    def _flush_bus(self, duration_s: float = 0.02) -> None:
+        if self._bus is None or can is None:
+            return
+        end = time.time() + max(0.0, float(duration_s))
+        try:
+            # Do not alter filters here; just drain
+            while time.time() < end:
+                msg = self._bus.recv(timeout=0.001)
+                if msg is None:
+                    break
+        except Exception:
+            pass
 
     def set_pid(self, node_id: int, kp: float, ki: float, kd: float) -> None:
         # Prefer RobStride client when connected; attempt a reasonable mapping
@@ -119,7 +235,7 @@ class RobStrideManager:
                 return
             except Exception:
                 pass
-        # TODO: send PID configuration message per protocol
+        # Raw protocol: PID mapping not yet defined in log; skip
 
     def enable_node(self, node_id: int, enable: bool) -> None:
         # Prefer RobStride client; avoid re-enabling every frame
@@ -147,7 +263,17 @@ class RobStrideManager:
 
         if self.simulate:
             return
-        # TODO: send enable/disable command per protocol
+        # Raw protocol fallback: map to run_mode (0: idle, 1: position)
+        if self.connected and self._bus is not None:
+            try:
+                mode_val = 1 if enable else 0
+                self._rs_raw_write_param_u32(node_id, 0x7005, mode_val)
+                if enable:
+                    self._enabled_nodes.add(node_id)
+                else:
+                    self._enabled_nodes.discard(node_id)
+            except Exception:
+                pass
 
     def send_position(self, node_id: int, value: float) -> None:
         # Prefer RobStride client; set Position mode once, then update loc_ref
@@ -183,7 +309,15 @@ class RobStrideManager:
         if self.simulate:
             self._stub_last[node_id] = float(value)
             return
-        # TODO: encode and send target position frame
+        # Raw protocol fallback: ensure Position mode then write loc_ref (0x7016) as float32
+        if self.connected and self._bus is not None:
+            try:
+                if node_id not in self._pos_mode_nodes:
+                    self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                    self._pos_mode_nodes.add(node_id)
+                self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
+            except Exception:
+                pass
 
     def read_position(self, node_id: int) -> float:
         # Prefer RobStride client when connected: read mechanical position (radians)
@@ -207,6 +341,14 @@ class RobStrideManager:
             self._stub_phase += 0.1
             return base + 0.1 * math.sin(self._stub_phase)
 
+        # Raw protocol fallback: read mechpos (0x7019) as float32
+        if self.connected and self._bus is not None:
+            try:
+                val = self._rs_raw_read_param_f32(node_id, 0x7019)
+                if val is not None:
+                    return float(val)
+            except Exception:
+                pass
         return 0.0
 
     # Internal helpers
@@ -238,6 +380,92 @@ class RobStrideManager:
                 self._rs_client = robstride_lib.Client(self._bus, retry_count=0, recv_timeout=0.01)
             except Exception:
                 self._rs_client = None
+
+    # --- Raw RobStride protocol (from candump) ---
+    # Extended 29-bit ID layout appears as 4 bytes: [cmd, 0x00, dest, src]
+    # Observed commands:
+    #  - 0x12: write parameter, payload: [index_le(2 bytes), 0x00,0x00, value(4 bytes)]
+    #  - 0x11: read parameter, request payload: [index_le, 0,0, 0,0,0,0],
+    #          response uses same cmd with dest/src swapped and value in last 4 bytes
+    # Indices observed:
+    #  - 0x7005: run_mode (1=Position, 0=Idle)
+    #  - 0x7016: loc_ref (target position)
+    #  - 0x7019: mechpos (mechanical position)
+
+    def _rs_make_id(self, cmd: int, dest: int, src: int | None = None) -> int:
+        s = self._host_addr if src is None else int(src) & 0xFF
+        d = int(dest) & 0xFF
+        return ((int(cmd) & 0xFF) << 24) | (0x00 << 16) | (d << 8) | s
+
+    def _rs_raw_send(self, cmd: int, dest: int, data: bytes) -> None:
+        if self._bus is None or can is None:
+            return
+        msg = can.Message(arbitration_id=self._rs_make_id(cmd, dest), data=data, is_extended_id=True)
+        self._bus.send(msg)
+
+    def _rs_raw_write_param_u32(self, node_id: int, index: int, value: int) -> None:
+        import struct
+        idx_le = struct.pack('<H', int(index) & 0xFFFF) + b"\x00\x00"
+        val = struct.pack('<I', int(value) & 0xFFFFFFFF)
+        self._rs_raw_send(0x12, int(node_id), idx_le + val)
+
+    def _rs_raw_write_param_f32(self, node_id: int, index: int, value: float) -> None:
+        import struct
+        idx_le = struct.pack('<H', int(index) & 0xFFFF) + b"\x00\x00"
+        val = struct.pack('<f', float(value))
+        self._rs_raw_send(0x12, int(node_id), idx_le + val)
+
+    def _rs_raw_read_param_f32(self, node_id: int, index: int, timeout_s: float = 0.02) -> float | None:
+        if self._bus is None or can is None:
+            return None
+        import struct, time as _time
+        # Send read request
+        payload = struct.pack('<H', int(index) & 0xFFFF) + b"\x00\x00" + b"\x00\x00\x00\x00"
+        self._rs_raw_send(0x11, int(node_id), payload)
+        # Expected response ID swaps dest/src
+        expect_id = self._rs_make_id(0x11, self._host_addr, src=int(node_id))
+        idx_bytes = payload[:4]
+        end_time = _time.time() + max(0.0, float(timeout_s))
+        while _time.time() < end_time:
+            msg = self._bus.recv(timeout=0.005)
+            if msg is None:
+                continue
+            if not msg.is_extended_id:
+                continue
+            if int(msg.arbitration_id) != int(expect_id):
+                continue
+            data = bytes(msg.data)
+            if len(data) != 8:
+                continue
+            if data[:4] != idx_bytes:
+                continue
+            return struct.unpack('<f', data[4:8])[0]
+        return None
+
+    def _rs_raw_read_param_u32(self, node_id: int, index: int, timeout_s: float = 0.02) -> int | None:
+        if self._bus is None or can is None:
+            return None
+        import struct, time as _time
+        payload = struct.pack('<H', int(index) & 0xFFFF) + b"\x00\x00" + b"\x00\x00\x00\x00"
+        self._rs_raw_send(0x11, int(node_id), payload)
+        expect_id = self._rs_make_id(0x11, self._host_addr, src=int(node_id))
+        idx_bytes = payload[:4]
+        end_time = _time.time() + max(0.0, float(timeout_s))
+        while _time.time() < end_time:
+            msg = self._bus.recv(timeout=0.005)
+            if msg is None:
+                continue
+            if not msg.is_extended_id:
+                continue
+            if int(msg.arbitration_id) != int(expect_id):
+                continue
+            data = bytes(msg.data)
+            if len(data) != 8:
+                continue
+            if data[:4] != idx_bytes:
+                continue
+            return int(struct.unpack('<I', data[4:8])[0])
+        return None
 
     def _get_or_add_node(self, node_id: int):
         if self._co_net is None or canopen is None:
@@ -382,6 +610,15 @@ class RobStrideManager:
                             node.sdo.download(0x607A, 0x00, struct.pack('<i', int(value)))
                         except Exception:
                             pass
+                    elif self.connected and self._bus is not None:
+                        try:
+                            # Raw protocol: ensure run_mode=1 once, then write loc_ref
+                            if node_id not in self._pos_mode_nodes:
+                                self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                                self._pos_mode_nodes.add(node_id)
+                            self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
+                        except Exception:
+                            pass
                     else:
                         # Offline simulate
                         with self._lock:
@@ -407,6 +644,14 @@ class RobStrideManager:
                             val = int.from_bytes(pos_bytes, 'little', signed=True)
                             with self._lock:
                                 self._last_read_pos[node_id] = float(val)
+                        except Exception:
+                            pass
+                    elif self.connected and self._bus is not None:
+                        try:
+                            val = self._rs_raw_read_param_f32(node_id, 0x7019)
+                            if val is not None:
+                                with self._lock:
+                                    self._last_read_pos[node_id] = float(val)
                         except Exception:
                             pass
                     else:

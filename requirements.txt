@@ -1,6 +1,6 @@
-python-can==4.6.1
-canopen==2.4.1
-robstride==0.1.0
-packaging==25.0
-typing_extensions==4.15.0
-wrapt==1.17.3
+python-can
+canopen
+robstride
+packaging
+typing_extensions
+wrapt

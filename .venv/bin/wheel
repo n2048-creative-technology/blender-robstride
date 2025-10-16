@@ -1,4 +1,4 @@
-#!/home/mauricio/n2048/Mauricio/robstride-blender-addon/.venv/bin/python
+#!/home/mauricio/Documents/Mauricio/blender-robstride/.venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

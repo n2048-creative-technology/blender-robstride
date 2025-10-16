@@ -1,4 +1,4 @@
-#!/home/mauricio/n2048/Mauricio/robstride-blender-addon/.venv/bin/python
+#!/home/mauricio/Documents/Mauricio/blender-robstride/.venv/bin/python
 import sys
 from can.logconvert import main
 if __name__ == '__main__':

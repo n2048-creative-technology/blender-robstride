@@ -1,0 +1,6 @@
+#!/bin/bash
+
+cansend can0 1200AA7F#0570000001000000
+
+cansend can0 0300AA7F#0000000000000000
+

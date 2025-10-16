@@ -28,14 +28,14 @@ echo "[2/6] Upgrading pip/setuptools/wheel"
 python -m pip install --upgrade pip setuptools wheel
 
 echo "[3/6] Installing runtime dependencies into venv"
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt  --upgrade
 
 echo "[4/6] Resolving and downloading wheels for all deps"
 mkdir -p wheels vendor
 python -m pip download -d wheels -r requirements.txt
 
 echo "[5/6] Vendoring deps into ./vendor (from local wheels)"
-python -m pip install --no-index --find-links wheels -t vendor -r requirements.txt
+python -m pip install --no-index --find-links wheels -t vendor -r requirements.txt  --upgrade
 
 echo "[6/6] Verifying vendored imports"
 python - <<'PY'

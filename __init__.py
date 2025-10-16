@@ -47,6 +47,25 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
         min=10000,
         soft_max=2000000,
     )
+    scan_min_id: IntProperty(
+        name="Scan Min ID",
+        description="Lowest node ID to probe when scanning (raw protocol)",
+        default=1,
+        min=1,
+        max=127,
+    )
+    scan_max_id: IntProperty(
+        name="Scan Max ID",
+        description="Highest node ID to probe when scanning (raw protocol)",
+        default=127,
+        min=1,
+        max=127,
+    )
+    scan_quick: BoolProperty(
+        name="Quick Scan",
+        description="Probe common IDs only (faster). Disable for full range scan.",
+        default=True,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -54,6 +73,11 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "interface")
         col.prop(self, "channel")
         col.prop(self, "bitrate")
+        # Scan options
+        col.prop(self, "scan_quick")
+        grid = layout.grid_flow(columns=2, even_columns=True, even_rows=True)
+        grid.prop(self, "scan_min_id")
+        grid.prop(self, "scan_max_id")
 
 
 class RobStridenodeNode(bpy.types.PropertyGroup):
@@ -73,21 +97,21 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
     kd: FloatProperty(name="Kd", default=0.0)
     scale: FloatProperty(
         name="Scale",
-        description="Multiplier to convert radians <-> node units",
+        description="Radians in/out (device speaks radians). Keep 1.0 unless you need gearing/scaling.",
         default=1.0,
     )
     offset: FloatProperty(
         name="Offset",
-        description="Offset for conversion",
+        description="Radians offset (additive) if needed. Typically 0.0.",
         default=0.0,
     )
     min_rot: FloatProperty(
-        name="Min Z",
+        name="Min Z (rad)",
         description="Minimum allowed Z rotation (radians)",
         default=-6.283185307179586,
     )
     max_rot: FloatProperty(
-        name="Max Z",
+        name="Max Z (rad)",
         description="Maximum allowed Z rotation (radians)",
         default=6.283185307179586,
     )
@@ -109,6 +133,13 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             channel=prefs.channel,
             bitrate=prefs.bitrate,
         )
+        # Scan options for raw protocol
+        try:
+            robstride_can.manager.set_scan_options(
+                min_id=int(prefs.scan_min_id), max_id=int(prefs.scan_max_id), quick=bool(prefs.scan_quick)
+            )
+        except Exception:
+            pass
         # Respect simulation toggle even when connected (scan will merge sim + real)
         sim_flag = bool(context.scene.robstride_simulate)
         connected = robstride_can.manager.is_connected()
@@ -166,6 +197,13 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
             bitrate=prefs.bitrate,
         )
         robstride_can.manager.set_simulate(bool(scene.robstride_simulate))
+        # Scan options for raw protocol
+        try:
+            robstride_can.manager.set_scan_options(
+                min_id=int(prefs.scan_min_id), max_id=int(prefs.scan_max_id), quick=bool(prefs.scan_quick)
+            )
+        except Exception:
+            pass
 
         if robstride_can.manager.is_connected():
             robstride_can.manager.disconnect()
