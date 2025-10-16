@@ -19,7 +19,6 @@ with can.Bus(interface='socketcan', channel='can0') as bus:
 
     print("disable");
     rs.disable(MID)
-    exit();
 
     while True:
         readPos(rs);
