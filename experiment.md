@@ -1,4 +1,14 @@
 
+# change ID:
+```
+cansend can0 07{NEW_ID=01}{HOST_ID=AA}{CURRENT_ID=127}#0000000000000000
+```
+
+example change the id of motor 127 to 01
+```
+cansend can0 0701AA7F#0000000000000000
+```
+
 
 # From terminal A, send commands to request position
 ```
