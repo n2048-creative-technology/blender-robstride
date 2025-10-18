@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List
 import threading
 import queue
+import struct
 
 try:
     import can  # type: ignore
@@ -43,7 +44,8 @@ class RobStrideManager:
         self._enabled_nodes = set()
         self._pos_mode_nodes = set()
         # Raw RobStride protocol addressing (from candump): host 0x7F, node_id is 1 byte
-        self._host_addr = 0x7F
+        # self._host_addr = 0x7F
+        self._host_addr = 0xAA
         # Scan options
         self._scan_min_id = 1
         self._scan_max_id = 127
@@ -119,7 +121,7 @@ class RobStrideManager:
                         self._bus.set_filters(None)
                     except Exception:
                         pass
-                except Exception:
+                except Exstructception:
                     pass
             elif vendor_candidates:
                 # No raw bus to verify; accept vendor results
@@ -281,10 +283,24 @@ class RobStrideManager:
                 pass
 
     def send_position(self, node_id: int, value: float) -> None:
+
+        # print(self._host_addr,node_id,value)
+        # # Extended ID for Type=0x12 (single param write): 0x12{HOST16}{MOTOR8}
+        # arb_id=((0x12 & 0x1F) << 24) | ((self._host_addr & 0xFFFF) << 8) | (node_id & 0xFF)
+        # print(arb_id)
+        # # Data payload: 16 70 00 00 <float32 LE radians>
+        # # (index 0x7016 in little endian)
+        # rad_bytes = struct.pack("<f", value) 
+        # data = bytes([0x16, 0x70, 0x00, 0x00]) + rad_bytes
+        # msg = can.Message(arbitration_id=arb_id, is_extended_id=True, data=data)
+        # self._bus.send(msg)
+        # return
+    
         # RAW first (matches move.py), then CANopen, then vendor client
         if self.simulate:
             self._stub_last[node_id] = float(value)
             return
+        
         if self.connected and self._bus is not None:
             try:
                 if node_id not in self._enabled_nodes:
@@ -300,7 +316,7 @@ class RobStrideManager:
                         pass
                 if node_id not in self._pos_mode_nodes:
                     self._rs_raw_write_param_u32(node_id, 0x7005, 1)
-                    self._pos_mode_nodes.add(node_id)
+                    self._pos_mode_nodes.add(node_id)                    
                 self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
                 return
             except Exception:
@@ -422,6 +438,7 @@ class RobStrideManager:
         if self._bus is None or can is None:
             return
         msg = can.Message(arbitration_id=self._rs_make_id(cmd, dest), data=data, is_extended_id=True)
+        # print(msg)
         self._bus.send(msg)
 
     def _rs_raw_write_param_u32(self, node_id: int, index: int, value: int) -> None:

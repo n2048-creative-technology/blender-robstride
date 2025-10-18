@@ -714,24 +714,25 @@ def robstride_sync_handler(scene):
             _last_mode[node_id] = node.mode
 
         if node.mode == 'RUN':
-
-            self.report({'INFO'}, f"in run mode")
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
             z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])
             # Clamp to configured bounds if valid
-            try:
-                if node.min_rot < node.max_rot:
-                    if z_rad < node.min_rot:
-                        z_rad = node.min_rot
-                    elif z_rad > node.max_rot:
-                        z_rad = node.max_rot
-            except Exception:
-                pass
+            # try:
+            #     if node.min_rot < node.max_rot:
+            #         if z_rad < node.min_rot:
+            #             z_rad = node.min_rot
+            #         elif z_rad > node.max_rot:
+            #             z_rad = node.max_rot
+            # except Exception:
+            #     pass
             node_units = node.scale * z_rad + node.offset
 
-            # Non-blocking: enqueue position for background worker
-            robstride_can.manager.post_position(node_id, node_units)
+            # Send synchronously per frame to mirror move.py timing
+            try:
+                robstride_can.manager.send_position(node_id, node_units)
+            except Exception:
+                pass
 
         elif node.mode == 'LEARN':
             # Non-blocking: request a read and use last cached value if available
