@@ -283,19 +283,6 @@ class RobStrideManager:
                 pass
 
     def send_position(self, node_id: int, value: float) -> None:
-
-        # print(self._host_addr,node_id,value)
-        # # Extended ID for Type=0x12 (single param write): 0x12{HOST16}{MOTOR8}
-        # arb_id=((0x12 & 0x1F) << 24) | ((self._host_addr & 0xFFFF) << 8) | (node_id & 0xFF)
-        # print(arb_id)
-        # # Data payload: 16 70 00 00 <float32 LE radians>
-        # # (index 0x7016 in little endian)
-        # rad_bytes = struct.pack("<f", value) 
-        # data = bytes([0x16, 0x70, 0x00, 0x00]) + rad_bytes
-        # msg = can.Message(arbitration_id=arb_id, is_extended_id=True, data=data)
-        # self._bus.send(msg)
-        # return
-    
         # RAW first (matches move.py), then CANopen, then vendor client
         if self.simulate:
             self._stub_last[node_id] = float(value)
