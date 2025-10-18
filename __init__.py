@@ -47,11 +47,18 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
         min=10000,
         soft_max=2000000,
     )
+    host_id_low: IntProperty(
+        name="Host ID (low byte)",
+        description="Low 8 bits of host/master ID for raw protocol (use 0xAA per your working frames)",
+        default=0xAA,
+        min=0,
+        max=255,
+    )
     scan_min_id: IntProperty(
         name="Scan Min ID",
         description="Lowest node ID to probe when scanning (raw protocol)",
-        default=1,
-        min=1,
+        default=0,
+        min=0,
         max=127,
     )
     scan_max_id: IntProperty(
@@ -73,6 +80,7 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "interface")
         col.prop(self, "channel")
         col.prop(self, "bitrate")
+        col.prop(self, "host_id_low")
         # Scan options
         col.prop(self, "scan_quick")
         grid = layout.grid_flow(columns=2, even_columns=True, even_rows=True)
@@ -84,6 +92,11 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
     name: StringProperty(name="Name", default="Node")
     node_id: IntProperty(name="ID", default=0, min=0)
     object_ref: PointerProperty(name="Object", type=bpy.types.Object)
+    target_deg: FloatProperty(
+        name="Target (deg)",
+        description="Target position to send using raw protocol (degrees)",
+        default=0.0,
+    )
     mode: EnumProperty(
         name="Mode",
         items=[
@@ -133,6 +146,16 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             channel=prefs.channel,
             bitrate=prefs.bitrate,
         )
+        # Force raw protocol to match provided scripts
+        try:
+            robstride_can.manager.set_prefer_vendor(False)
+        except Exception:
+            pass
+        # Match raw protocol host/master low byte with working scripts (default 0xAA)
+        try:
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
         # Scan options for raw protocol
         try:
             robstride_can.manager.set_scan_options(
@@ -145,10 +168,14 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
         connected = robstride_can.manager.is_connected()
         robstride_can.manager.set_simulate(sim_flag)
 
-        # Require an active connection unless simulation is enabled
+        # If not connected and not simulating, attempt a temporary connection for scanning
+        temp_connected = False
         if not (connected or sim_flag):
-            self.report({'ERROR'}, "Not connected. Click Connect or enable 'Show Simulated Nodes'.")
-            return {'CANCELLED'}
+            if robstride_can.manager.connect():
+                temp_connected = True
+            else:
+                self.report({'ERROR'}, "Not connected and failed to connect for scan.")
+                return {'CANCELLED'}
 
         found = robstride_can.manager.scan()
 
@@ -176,6 +203,13 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
                 n.name = m_name
                 n.node_id = m_id
 
+        # Disconnect if we connected temporarily just for the scan
+        if temp_connected:
+            try:
+                robstride_can.manager.disconnect()
+            except Exception:
+                pass
+
         self.report({'INFO'}, f"Found {len(found)} nodes")
         return {'FINISHED'}
 
@@ -196,6 +230,15 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
             channel=prefs.channel,
             bitrate=prefs.bitrate,
         )
+        try:
+            robstride_can.manager.set_prefer_vendor(False)
+        except Exception:
+            pass
+        # Ensure raw protocol host/master low byte matches expected (0xAA)
+        try:
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
         robstride_can.manager.set_simulate(bool(scene.robstride_simulate))
         # Scan options for raw protocol
         try:
@@ -238,6 +281,110 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
 
         self.report({'INFO'}, "Connected and prepared nodes")
         return {'FINISHED'}
+
+
+class ROBSTRIDE_OT_node_enable(bpy.types.Operator):
+    bl_idname = "robstride.node_enable"
+    bl_label = "Enable"
+    bl_description = "Enable the selected node using raw protocol semantics"
+    bl_options = {"REGISTER"}
+
+    node_id: IntProperty()
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        # Ensure host low byte matches scripts and connect if needed
+        try:
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        temp = False
+        if not robstride_can.manager.is_connected():
+            if robstride_can.manager.connect():
+                temp = True
+        try:
+            robstride_can.manager.enable_node(int(self.node_id), True)
+            self.report({'INFO'}, f"Enabled node {int(self.node_id)}")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Enable failed: {e}")
+            return {'CANCELLED'}
+        finally:
+            if temp:
+                try:
+                    robstride_can.manager.disconnect()
+                except Exception:
+                    pass
+
+
+class ROBSTRIDE_OT_node_disable(bpy.types.Operator):
+    bl_idname = "robstride.node_disable"
+    bl_label = "Disable"
+    bl_description = "Disable/STOP the selected node using raw protocol semantics"
+    bl_options = {"REGISTER"}
+
+    node_id: IntProperty()
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        try:
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        temp = False
+        if not robstride_can.manager.is_connected():
+            if robstride_can.manager.connect():
+                temp = True
+        try:
+            robstride_can.manager.enable_node(int(self.node_id), False)
+            self.report({'INFO'}, f"Disabled node {int(self.node_id)}")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Disable failed: {e}")
+            return {'CANCELLED'}
+        finally:
+            if temp:
+                try:
+                    robstride_can.manager.disconnect()
+                except Exception:
+                    pass
+
+
+class ROBSTRIDE_OT_node_move(bpy.types.Operator):
+    bl_idname = "robstride.node_move"
+    bl_label = "Send Target"
+    bl_description = "Send a target position (degrees) to the node"
+    bl_options = {"REGISTER"}
+
+    node_id: IntProperty()
+    degrees: FloatProperty(name="Degrees", default=0.0)
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        # Convert degrees to radians as used by move.py
+        import math
+        try:
+            try:
+                robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            temp = False
+            if not robstride_can.manager.is_connected():
+                if robstride_can.manager.connect():
+                    temp = True
+            radians = float(self.degrees) * math.pi / 180.0
+            robstride_can.manager.send_position(int(self.node_id), radians)
+            self.report({'INFO'}, f"Node {int(self.node_id)} -> {float(self.degrees):.2f}°")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Send failed: {e}")
+            return {'CANCELLED'}
+        finally:
+            if 'temp' in locals() and temp:
+                try:
+                    robstride_can.manager.disconnect()
+                except Exception:
+                    pass
 
 
 class ROBSTRIDE_OT_save_config(bpy.types.Operator):
@@ -423,6 +570,19 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             col.prop(node, "object_ref")
             col.prop(node, "mode", expand=True)
 
+            # Simple raw control buttons based on enable.py/disable.py/move.py
+            row_ctl = box.row(align=True)
+            op_en = row_ctl.operator(ROBSTRIDE_OT_node_enable.bl_idname, text="Enable", icon='PLAY')
+            op_en.node_id = node.node_id
+            op_dis = row_ctl.operator(ROBSTRIDE_OT_node_disable.bl_idname, text="Disable", icon='PAUSE')
+            op_dis.node_id = node.node_id
+
+            row_mv = box.row(align=True)
+            row_mv.prop(node, "target_deg")
+            op_mv = row_mv.operator(ROBSTRIDE_OT_node_move.bl_idname, text="Send", icon='TRACKING_FORWARDS')
+            op_mv.node_id = node.node_id
+            op_mv.degrees = node.target_deg
+
             grid = box.grid_flow(columns=2, even_columns=True, even_rows=True)
             grid.prop(node, "kp")
             grid.prop(node, "ki")
@@ -504,6 +664,24 @@ def _on_simulate_update(self, context):
 def robstride_sync_handler(scene):
     # Run on every frame change; avoids relying on context.screen in handlers
 
+    # Keep host ID (low byte) synced from preferences so raw frames match scripts
+    try:
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        try:
+            robstride_can.manager.set_prefer_vendor(False)
+        except Exception:
+            pass
+        robstride_can.manager._host_addr = int(getattr(prefs, 'host_id_low', 0xAA)) & 0xFF  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    # If not connected and not simulating, try to connect so RUN mode can drive motors
+    try:
+        if not robstride_can.manager.is_connected() and not bool(scene.robstride_simulate):
+            robstride_can.manager.connect()
+    except Exception:
+        pass
+
     for node in scene.robstride_nodes:
         if not node.object_ref:
             continue
@@ -524,6 +702,11 @@ def robstride_sync_handler(scene):
             try:
                 if node.mode == 'LEARN':
                     robstride_can.manager.enable_node(node_id, False)
+                    # Ensure object uses Euler so Z rotation is keyframable and visible
+                    try:
+                        obj.rotation_mode = 'XYZ'
+                    except Exception:
+                        pass
                 elif node.mode == 'RUN':
                     robstride_can.manager.enable_node(node_id, True)
             except Exception:
@@ -578,6 +761,9 @@ classes = (
     RobStridenodeNode,
     ROBSTRIDE_OT_scan,
     ROBSTRIDE_OT_connect_toggle,
+    ROBSTRIDE_OT_node_enable,
+    ROBSTRIDE_OT_node_disable,
+    ROBSTRIDE_OT_node_move,
     ROBSTRIDE_OT_save_config,
     ROBSTRIDE_OT_load_config,
     ROBSTRIDE_OT_install_deps,

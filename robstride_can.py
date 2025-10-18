@@ -55,6 +55,8 @@ class RobStrideManager:
         self._pending_reads: set[int] = set()
         self._last_read_pos: Dict[int, float] = {}
         self._lock = threading.Lock()
+        # Prefer raw protocol by default to mirror working scripts
+        self._prefer_vendor = False
 
     # Public API used by the add-on
     def configure(self, interface: str, channel: str, bitrate: int) -> None:
@@ -63,6 +65,9 @@ class RobStrideManager:
         self.bitrate = int(bitrate)
         # Do not auto-connect here; explicit connect() controls connection state
 
+    def set_prefer_vendor(self, value: bool) -> None:
+        self._prefer_vendor = bool(value)
+
     def scan(self) -> List[Dict[str, Any]]:
         # If connected, collect real nodes; if simulate is enabled, always include simulated nodes too
         results: List[Dict[str, Any]] = []
@@ -70,7 +75,7 @@ class RobStrideManager:
         if self.connected:
             # Try official library first (but verify each via raw read if possible)
             vendor_candidates: List[int] = []
-            if robstride_lib is not None:
+            if robstride_lib is not None and self._prefer_vendor:
                 try:
                     nodes = robstride_lib.scan(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
                     for m in nodes:
@@ -90,7 +95,7 @@ class RobStrideManager:
                 except Exception:
                     pass
 
-            # Verify candidates via raw read when possible
+            # Verify candidates via raw read when possible (single read, like scan_nodes.py)
             if vendor_candidates and self._bus is not None and can is not None:
                 try:                    
                     self._flush_bus(0.05)
@@ -103,19 +108,10 @@ class RobStrideManager:
                                 ])
                             except Exception:
                                 pass
-                            v1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.006)
-                            v2 = None
-                            if v1 is not None and not math.isnan(v1):
-                                v2 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.006)
-                            # Additional sanity: read run_mode (0x7005) as u32
-                            mode_val = None
-                            if (v1 is not None and not math.isnan(v1)):
-                                mode_val = self._rs_raw_read_param_u32(nid, 0x7005, timeout_s=0.004)
+                            v1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.03)
                         except Exception:
                             v1 = None
-                            v2 = None
-                            mode_val = None
-                        if (v1 is not None and not math.isnan(v1)) and (v2 is not None and not math.isnan(v2)) and (mode_val is not None and 0 <= int(mode_val) < 16):
+                        if (v1 is not None and not math.isnan(v1)):
                             if nid not in real_ids:
                                 real_ids.add(nid)
                                 results.append({"id": nid, "name": f"Node {nid}"})
@@ -132,14 +128,14 @@ class RobStrideManager:
                         real_ids.add(nid)
                         results.append({"id": nid, "name": f"Node {nid}"})
 
-            # Raw protocol probe if we still have no results and a CAN bus is available
+            # Raw protocol probe (single read per ID), like scan_nodes.py
             if self._bus is not None and can is not None and not results:
                 try:
                     # Drain any pending frames to avoid matching stale responses
                     self._flush_bus(0.05)
                     # Probe a reasonable address range quickly using a short timeout per ID
-                    # Using mechpos (0x7019) read twice + run_mode read to verify presence
-                    min_id = max(1, int(self._scan_min_id))
+                    # Using mechpos (0x7019) single read to verify presence
+                    min_id = max(0, int(self._scan_min_id))
                     max_id = min(127, int(self._scan_max_id))
                     if not self._scan_quick:
                         probe_ids = range(min_id, max_id + 1)
@@ -156,18 +152,10 @@ class RobStrideManager:
                                 ])
                             except Exception:
                                 pass
-                            val1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.003)
-                            val2 = None
-                            if val1 is not None and not math.isnan(val1):
-                                val2 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.003)
-                            mode_val = None
-                            if val1 is not None and not math.isnan(val1):
-                                mode_val = self._rs_raw_read_param_u32(nid, 0x7005, timeout_s=0.003)
+                            val1 = self._rs_raw_read_param_f32(nid, 0x7019, timeout_s=0.03)
                         except Exception:
                             val1 = None
-                            val2 = None
-                            mode_val = None
-                        if (val1 is not None and not math.isnan(val1)) and (val2 is not None and not math.isnan(val2)) and (mode_val is not None and 0 <= int(mode_val) < 16):
+                        if (val1 is not None and not math.isnan(val1)):
                             real_ids.add(nid)
                             results.append({"id": nid, "name": f"Node {nid}"})
                     # Clear filters
@@ -192,7 +180,7 @@ class RobStrideManager:
 
     def set_scan_options(self, min_id: int | None = None, max_id: int | None = None, quick: bool | None = None) -> None:
         if min_id is not None:
-            self._scan_min_id = max(1, int(min_id))
+            self._scan_min_id = max(0, int(min_id))
         if max_id is not None:
             self._scan_max_id = min(127, int(max_id))
         if self._scan_max_id < self._scan_min_id:
@@ -215,7 +203,7 @@ class RobStrideManager:
 
     def set_pid(self, node_id: int, kp: float, ki: float, kd: float) -> None:
         # Prefer RobStride client when connected; attempt a reasonable mapping
-        if self.connected and robstride_lib is not None and self._rs_client is not None:
+        if self.connected and self._prefer_vendor and robstride_lib is not None and self._rs_client is not None:
             try:
                 # Map Blender Kp/Ki/Kd to RobStride params (heuristic)
                 self._rs_client.write_param(node_id, 'loc_kp', float(kp))
@@ -225,7 +213,7 @@ class RobStrideManager:
             except Exception:
                 pass
 
-        if self.connected and self._co_net is not None and canopen is not None:
+        if self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
             try:
                 node = self._get_or_add_node(node_id)
                 import struct
@@ -251,7 +239,7 @@ class RobStrideManager:
             except Exception:
                 pass
 
-        if self.connected and self._co_net is not None and canopen is not None:
+        if self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
             try:
                 node = self._get_or_add_node(node_id)
                 import struct
@@ -266,11 +254,28 @@ class RobStrideManager:
         # Raw protocol fallback: map to run_mode (0: idle, 1: position)
         if self.connected and self._bus is not None:
             try:
-                mode_val = 1 if enable else 0
-                self._rs_raw_write_param_u32(node_id, 0x7005, mode_val)
                 if enable:
+                    # enable.py behavior: write run_mode=1 (0x7005) then Type=0x03 enable command
+                    self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                    try:
+                        time.sleep(0.02)
+                    except Exception:
+                        pass
+                    try:
+                        self._rs_raw_send(0x03, int(node_id), bytes(8))
+                    except Exception:
+                        pass
                     self._enabled_nodes.add(node_id)
                 else:
+                    # disable.py behavior: Type=0x04 STOP command; also set run_mode=0
+                    try:
+                        self._rs_raw_send(0x04, int(node_id), bytes(8))
+                    except Exception:
+                        pass
+                    try:
+                        self._rs_raw_write_param_u32(node_id, 0x7005, 0)
+                    except Exception:
+                        pass
                     self._enabled_nodes.discard(node_id)
             except Exception:
                 pass
@@ -287,7 +292,7 @@ class RobStrideManager:
             except Exception:
                 pass
 
-        if self.connected and self._co_net is not None and canopen is not None:
+        if self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
             try:
                 node = self._get_or_add_node(node_id)
                 import struct
@@ -312,6 +317,18 @@ class RobStrideManager:
         # Raw protocol fallback: ensure Position mode then write loc_ref (0x7016) as float32
         if self.connected and self._bus is not None:
             try:
+                # Mirror move.py by ensuring the node is enabled and in position mode
+                if node_id not in self._enabled_nodes:
+                    try:
+                        self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                        try:
+                            time.sleep(0.02)
+                        except Exception:
+                            pass
+                        self._rs_raw_send(0x03, int(node_id), bytes(8))
+                        self._enabled_nodes.add(node_id)
+                    except Exception:
+                        pass
                 if node_id not in self._pos_mode_nodes:
                     self._rs_raw_write_param_u32(node_id, 0x7005, 1)
                     self._pos_mode_nodes.add(node_id)
@@ -374,7 +391,7 @@ class RobStrideManager:
                 except Exception:
                     self._bus = None
         # Initialize RobStride client if a CAN bus is available
-        if self._bus is not None and robstride_lib is not None:
+        if self._bus is not None and robstride_lib is not None and self._prefer_vendor:
             try:
                 # Short timeout to keep worker responsive
                 self._rs_client = robstride_lib.Client(self._bus, retry_count=0, recv_timeout=0.01)
@@ -393,9 +410,14 @@ class RobStrideManager:
     #  - 0x7019: mechpos (mechanical position)
 
     def _rs_make_id(self, cmd: int, dest: int, src: int | None = None) -> int:
+        # Match scan_nodes.py framing:
+        #  Request (read 0x11): 0x11 00 <host> <node>
+        #  Response:           0x11 00 <node> <host>
+        # Here, 'dest' is the node ID (unless building an expected response), and
+        # 'src' is the byte to place in the third position.
         s = self._host_addr if src is None else int(src) & 0xFF
         d = int(dest) & 0xFF
-        return ((int(cmd) & 0xFF) << 24) | (0x00 << 16) | (d << 8) | s
+        return ((int(cmd) & 0xFF) << 24) | (0x00 << 16) | (s << 8) | d
 
     def _rs_raw_send(self, cmd: int, dest: int, data: bytes) -> None:
         if self._bus is None or can is None:
@@ -585,7 +607,7 @@ class RobStrideManager:
             for node_id, value in pos_items:
                 try:
                     # Ensure enabled and in Position mode
-                    if self.connected and self._rs_client is not None and robstride_lib is not None:
+                    if self.connected and self._prefer_vendor and self._rs_client is not None and robstride_lib is not None:
                         if node_id not in self._enabled_nodes:
                             try:
                                 self._rs_client.enable(node_id)
@@ -602,7 +624,7 @@ class RobStrideManager:
                             self._rs_client.write_param(node_id, 'loc_ref', float(value))
                         except Exception:
                             pass
-                    elif self.connected and self._co_net is not None and canopen is not None:
+                    elif self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
                         try:
                             node = self._get_or_add_node(node_id)
                             import struct
@@ -613,6 +635,13 @@ class RobStrideManager:
                     elif self.connected and self._bus is not None:
                         try:
                             # Raw protocol: ensure run_mode=1 once, then write loc_ref
+                            if node_id not in self._enabled_nodes:
+                                try:
+                                    self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                                    self._rs_raw_send(0x03, int(node_id), bytes(8))
+                                    self._enabled_nodes.add(node_id)
+                                except Exception:
+                                    pass
                             if node_id not in self._pos_mode_nodes:
                                 self._rs_raw_write_param_u32(node_id, 0x7005, 1)
                                 self._pos_mode_nodes.add(node_id)
@@ -630,14 +659,14 @@ class RobStrideManager:
             # Perform reads
             for node_id in read_ids:
                 try:
-                    if self.connected and self._rs_client is not None and robstride_lib is not None:
+                    if self.connected and self._prefer_vendor and self._rs_client is not None and robstride_lib is not None:
                         try:
                             angle = self._rs_client.read_param(node_id, 'mechpos')
                             with self._lock:
                                 self._last_read_pos[node_id] = float(angle)
                         except Exception:
                             pass
-                    elif self.connected and self._co_net is not None and canopen is not None:
+                    elif self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
                         try:
                             node = self._get_or_add_node(node_id)
                             pos_bytes = node.sdo.upload(0x6064, 0x00)
