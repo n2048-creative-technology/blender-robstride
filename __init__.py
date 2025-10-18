@@ -714,6 +714,8 @@ def robstride_sync_handler(scene):
             _last_mode[node_id] = node.mode
 
         if node.mode == 'RUN':
+
+            self.report({'INFO'}, f"in run mode")
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
             z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])

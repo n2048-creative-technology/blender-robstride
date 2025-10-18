@@ -281,18 +281,31 @@ class RobStrideManager:
                 pass
 
     def send_position(self, node_id: int, value: float) -> None:
-        # Prefer RobStride client; set Position mode once, then update loc_ref
-        if self.connected and robstride_lib is not None and self._rs_client is not None:
+        # RAW first (matches move.py), then CANopen, then vendor client
+        if self.simulate:
+            self._stub_last[node_id] = float(value)
+            return
+        if self.connected and self._bus is not None:
             try:
+                if node_id not in self._enabled_nodes:
+                    try:
+                        self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                        try:
+                            time.sleep(0.02)
+                        except Exception:
+                            pass
+                        self._rs_raw_send(0x03, int(node_id), bytes(8))
+                        self._enabled_nodes.add(node_id)
+                    except Exception:
+                        pass
                 if node_id not in self._pos_mode_nodes:
-                    self._rs_client.write_param(node_id, 'run_mode', robstride_lib.RunMode.Position)
+                    self._rs_raw_write_param_u32(node_id, 0x7005, 1)
                     self._pos_mode_nodes.add(node_id)
-                self._rs_client.write_param(node_id, 'loc_ref', float(value))
+                self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
                 return
             except Exception:
                 pass
-
-        if self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
+        if self.connected and self._co_net is not None and canopen is not None:
             try:
                 node = self._get_or_add_node(node_id)
                 import struct
@@ -310,29 +323,13 @@ class RobStrideManager:
                 return
             except Exception:
                 pass
-
-        if self.simulate:
-            self._stub_last[node_id] = float(value)
-            return
-        # Raw protocol fallback: ensure Position mode then write loc_ref (0x7016) as float32
-        if self.connected and self._bus is not None:
+        if self.connected and robstride_lib is not None and self._rs_client is not None:
             try:
-                # Mirror move.py by ensuring the node is enabled and in position mode
-                if node_id not in self._enabled_nodes:
-                    try:
-                        self._rs_raw_write_param_u32(node_id, 0x7005, 1)
-                        try:
-                            time.sleep(0.02)
-                        except Exception:
-                            pass
-                        self._rs_raw_send(0x03, int(node_id), bytes(8))
-                        self._enabled_nodes.add(node_id)
-                    except Exception:
-                        pass
                 if node_id not in self._pos_mode_nodes:
-                    self._rs_raw_write_param_u32(node_id, 0x7005, 1)
+                    self._rs_client.write_param(node_id, 'run_mode', robstride_lib.RunMode.Position)
                     self._pos_mode_nodes.add(node_id)
-                self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
+                self._rs_client.write_param(node_id, 'loc_ref', float(value))
+                return
             except Exception:
                 pass
 
@@ -384,10 +381,12 @@ class RobStrideManager:
                 self._co_net = None
         if can is not None:
             try:
-                self._bus = can.Bus(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
+                # Match script usage: can.interface.Bus(bustype=..., channel=..., bitrate=...)
+                self._bus = can.interface.Bus(channel=self.channel, bustype=self.interface, bitrate=self.bitrate)
             except Exception:
                 try:
-                    self._bus = can.Bus(interface=self.interface, channel=self.channel)
+                    # Fallback without bitrate if driver rejects it
+                    self._bus = can.interface.Bus(channel=self.channel, bustype=self.interface)
                 except Exception:
                     self._bus = None
         # Initialize RobStride client if a CAN bus is available
@@ -603,38 +602,12 @@ class RobStrideManager:
                 read_ids = list(self._pending_reads)
                 self._pending_reads.clear()
 
-            # Send positions
+            # Send positions (RAW -> CANopen -> vendor, else simulate)
             for node_id, value in pos_items:
                 try:
-                    # Ensure enabled and in Position mode
-                    if self.connected and self._prefer_vendor and self._rs_client is not None and robstride_lib is not None:
-                        if node_id not in self._enabled_nodes:
-                            try:
-                                self._rs_client.enable(node_id)
-                                self._enabled_nodes.add(node_id)
-                            except Exception:
-                                pass
-                        if node_id not in self._pos_mode_nodes:
-                            try:
-                                self._rs_client.write_param(node_id, 'run_mode', robstride_lib.RunMode.Position)
-                                self._pos_mode_nodes.add(node_id)
-                            except Exception:
-                                pass
+                    sent = False
+                    if self.connected and self._bus is not None:
                         try:
-                            self._rs_client.write_param(node_id, 'loc_ref', float(value))
-                        except Exception:
-                            pass
-                    elif self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
-                        try:
-                            node = self._get_or_add_node(node_id)
-                            import struct
-                            node.sdo.download(0x6060, 0x00, struct.pack('<b', 1))
-                            node.sdo.download(0x607A, 0x00, struct.pack('<i', int(value)))
-                        except Exception:
-                            pass
-                    elif self.connected and self._bus is not None:
-                        try:
-                            # Raw protocol: ensure run_mode=1 once, then write loc_ref
                             if node_id not in self._enabled_nodes:
                                 try:
                                     self._rs_raw_write_param_u32(node_id, 0x7005, 1)
@@ -646,44 +619,66 @@ class RobStrideManager:
                                 self._rs_raw_write_param_u32(node_id, 0x7005, 1)
                                 self._pos_mode_nodes.add(node_id)
                             self._rs_raw_write_param_f32(node_id, 0x7016, float(value))
+                            sent = True
                         except Exception:
-                            pass
-                    else:
-                        # Offline simulate
+                            sent = False
+                    if (not sent) and self.connected and self._co_net is not None and canopen is not None:
+                        try:
+                            node = self._get_or_add_node(node_id)
+                            import struct
+                            node.sdo.download(0x6060, 0x00, struct.pack('<b', 1))
+                            node.sdo.download(0x607A, 0x00, struct.pack('<i', int(value)))
+                            sent = True
+                        except Exception:
+                            sent = False
+                    if (not sent) and self.connected and self._rs_client is not None and robstride_lib is not None:
+                        try:
+                            if node_id not in self._pos_mode_nodes:
+                                self._rs_client.write_param(node_id, 'run_mode', robstride_lib.RunMode.Position)
+                                self._pos_mode_nodes.add(node_id)
+                            self._rs_client.write_param(node_id, 'loc_ref', float(value))
+                            sent = True
+                        except Exception:
+                            sent = False
+                    if not sent:
                         with self._lock:
                             self._stub_last[node_id] = float(value)
                 except Exception:
                     # Never crash the worker
                     pass
 
-            # Perform reads
+            # Perform reads (RAW -> CANopen -> vendor, else simulate)
             for node_id in read_ids:
                 try:
-                    if self.connected and self._prefer_vendor and self._rs_client is not None and robstride_lib is not None:
+                    got = False
+                    if self.connected and self._bus is not None:
                         try:
-                            angle = self._rs_client.read_param(node_id, 'mechpos')
-                            with self._lock:
-                                self._last_read_pos[node_id] = float(angle)
+                            val = self._rs_raw_read_param_f32(node_id, 0x7019)
+                            if val is not None:
+                                with self._lock:
+                                    self._last_read_pos[node_id] = float(val)
+                                got = True
                         except Exception:
-                            pass
-                    elif self.connected and self._co_net is not None and canopen is not None and not self._prefer_vendor:
+                            got = False
+                    if (not got) and self.connected and self._co_net is not None and canopen is not None:
                         try:
                             node = self._get_or_add_node(node_id)
                             pos_bytes = node.sdo.upload(0x6064, 0x00)
                             val = int.from_bytes(pos_bytes, 'little', signed=True)
                             with self._lock:
                                 self._last_read_pos[node_id] = float(val)
+                            got = True
                         except Exception:
-                            pass
-                    elif self.connected and self._bus is not None:
+                            got = False
+                    if (not got) and self.connected and self._rs_client is not None and robstride_lib is not None:
                         try:
-                            val = self._rs_raw_read_param_f32(node_id, 0x7019)
-                            if val is not None:
-                                with self._lock:
-                                    self._last_read_pos[node_id] = float(val)
+                            angle = self._rs_client.read_param(node_id, 'mechpos')
+                            with self._lock:
+                                self._last_read_pos[node_id] = float(angle)
+                            got = True
                         except Exception:
-                            pass
-                    else:
+                            got = False
+                    if not got:
                         with self._lock:
                             base = self._stub_last.get(node_id, 0.0)
                             self._stub_phase += 0.1
