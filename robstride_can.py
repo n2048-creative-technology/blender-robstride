@@ -121,7 +121,7 @@ class RobStrideManager:
                         self._bus.set_filters(None)
                     except Exception:
                         pass
-                except Exstructception:
+                except Exception:
                     pass
             elif vendor_candidates:
                 # No raw bus to verify; accept vendor results
