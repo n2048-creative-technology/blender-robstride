@@ -55,3 +55,26 @@ PY
 echo "Target ${deg}° → LE float bytes ${hexbytes}"
 cansend can0 1200AA7F#16700000${hexbytes}
 ```
+
+
+
+
+IDEA:  
+use candump -l to record the interaction between blender and the motors, 
+and use canplayer to play the animation from command line.
+
+# 1 start logging
+```
+candump -l
+```
+
+# 2 play blender animation
+
+# 3 play the log
+```
+canplayer -I candump-2025-10-21_135559.log -x -v -l i
+```
+
+-l i --> loop infinite times 
+-x no loopback
+-v verbose

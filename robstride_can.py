@@ -60,6 +60,40 @@ class RobStrideManager:
         # Prefer raw protocol by default to mirror working scripts
         self._prefer_vendor = False
 
+    def _ensure_can_modules(self) -> None:
+        """Ensure optional CAN-related modules are importable at runtime.
+
+        On first Blender launch, dependencies may be installed dynamically
+        (via deps.ensure_dependencies). Since this module attempts imports at
+        import-time, those globals (can, canopen, robstride_lib) may be None
+        until the add-on is reloaded. This helper re-imports them lazily.
+        """
+        global can, canopen, robstride_lib
+        try:
+            # Add vendor path if wheels were installed there
+            from . import deps as _deps  # type: ignore
+            _deps.add_vendor_to_path()
+        except Exception:
+            pass
+        try:
+            if can is None:
+                import importlib
+                can = importlib.import_module('can')  # type: ignore
+        except Exception:
+            can = None  # type: ignore
+        try:
+            if canopen is None:
+                import importlib
+                canopen = importlib.import_module('canopen')  # type: ignore
+        except Exception:
+            canopen = None  # type: ignore
+        try:
+            if robstride_lib is None:
+                import importlib
+                robstride_lib = importlib.import_module('robstride')  # type: ignore
+        except Exception:
+            robstride_lib = None  # type: ignore
+
     # Public API used by the add-on
     def configure(self, interface: str, channel: str, bitrate: int) -> None:
         self.interface = interface
@@ -370,6 +404,8 @@ class RobStrideManager:
 
     # Internal helpers
     def _open_bus(self) -> None:
+        # Attempt to (re)import optional modules now that deps may be installed
+        self._ensure_can_modules()
         self._bus = None
         self._co_net = None
         self._nodes = {}

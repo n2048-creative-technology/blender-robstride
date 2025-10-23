@@ -2,9 +2,10 @@ $fn=180;
 
 //plateA();
 //plateB();
-!#mount90deg();
-motor();
-translate([40,0,83]) rotate([0,-90]) motor();
+
+aluMount90p1();
+%motor();
+%translate([40,0,100]) rotate([0,-90]) motor();
 
 /*
 hull(){
@@ -22,6 +23,66 @@ mirror([0,0,1])rotate(-90) #translate([-53.0,-39.5,27]) import("/home/mauricio/D
 rotate([0,-90]) rotate(-90) translate([-53.0,5,-18]) import("/home/mauricio/Documents/Mauricio/blender-robstride/models/RS02-body.stl");
 */
 
+module aluMount90p3(){    
+        a=78.5/2;
+        hull(){
+           translate([a+1,a-7]) cube([5,5,50]);
+           translate([a-14,a-7]) cube([20,5,4]);
+        }
+}
+
+module aluMount90p2(){
+    difference(){
+        mount90deg();
+        a=78.5/2;
+        linear_extrude(5,center=true)
+        difference(){
+            hull(){
+                circle(r=a);
+                translate([a+5-5,0]) square([5,2*a],center=true);             
+            }
+            circle(d=44);
+            for(i=[0:40:360]) rotate(i) translate([73/2,0]) circle(d=3.2);
+        }
+        
+        hull(){
+           translate([a+1,a-7]) cube([5,5,50]);
+           translate([a-14,a-7]) cube([20,5,4]);
+        }
+        hull(){
+           translate([a+1,7-a]) cube([5,5,50]);
+           translate([a-14,7-a]) cube([20,5,4]);
+        }        
+    }
+}
+
+module aluMount90p1(){
+    difference(){
+        mount90deg();
+        a=78.5/2;
+        
+        translate([a+5,0,100]) 
+        rotate([0,90]) linear_extrude(5,center=true)
+        difference(){
+            hull(){
+                circle(r=a);
+                translate([100,0]) square([5,2*a],center=true);             
+            }
+            circle(d=44.);
+            for(i=[0:40:360]) rotate(i) translate([73/2,0]) circle(d=3.2);
+        }
+        
+        hull(){
+           translate([a+1,a-7]) cube([5,5,50]);
+           translate([a-14,a-7]) cube([20,5,4]);
+        }
+        hull(){
+           translate([a+1,7-a]) cube([5,5,50]);
+           translate([a-14,7-a]) cube([20,5,4]);
+        }
+    }
+}
+
 module mount90deg(){
     a=78.5/2;
     linear_extrude(5,center=true)
@@ -34,12 +95,12 @@ module mount90deg(){
         for(i=[0:40:360]) rotate(i) translate([73/2,0]) circle(d=3.2);
     }
     
-    translate([a+5,0,83]) 
+    translate([a+5,0,100]) 
     rotate([0,90]) linear_extrude(5,center=true)
     difference(){
         hull(){
             circle(r=a);
-            translate([83,0]) square([5,2*a],center=true);             
+            translate([100,0]) square([5,2*a],center=true);             
         }
         circle(d=44.);
         for(i=[0:40:360]) rotate(i) translate([73/2,0]) circle(d=3.2);
