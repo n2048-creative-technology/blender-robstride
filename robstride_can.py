@@ -165,7 +165,8 @@ class RobStrideManager:
                         results.append({"id": nid, "name": f"Node {nid}"})
 
             # Raw protocol probe (single read per ID), like scan_nodes.py
-            if self._bus is not None and can is not None and not results:
+            # Always run this to merge with any CANopen/vendor results.
+            if self._bus is not None and can is not None:
                 try:
                     # Drain any pending frames to avoid matching stale responses
                     self._flush_bus(0.05)
@@ -179,6 +180,8 @@ class RobStrideManager:
                         common = (1, 2, 10, 42, 100, 120, 127)
                         probe_ids = [i for i in common if min_id <= i <= max_id]
                     for nid in probe_ids:
+                        if nid in real_ids:
+                            continue
                         try:
                             # Temporarily filter to the exact expected response ID to avoid noise
                             expect_id = self._rs_make_id(0x11, self._host_addr, src=int(nid))

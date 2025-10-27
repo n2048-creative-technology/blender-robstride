@@ -1,7 +1,7 @@
 $fn=180;
 
 //plateA();
-//plateB();
+!plateB();
 
 aluMount90p1();
 %motor();
@@ -145,7 +145,7 @@ module plateA(l=150){
 
 
 
-module plateB(l=150){
+module plateB(l=80,e=10){
     a=30/2;
     r=8;
     b=(r^2-a^2+(l/2)^2)/(2*(a-r));
@@ -153,10 +153,12 @@ module plateB(l=150){
     t=sqrt(h^2-a^2);
     echo(a,h,t);
 
-    linear_extrude(10)
+    
+    linear_extrude(10+e)
         for(i=[0:120:360]) rotate(i) translate([0,24/2]) circle(d=4);
+
     translate([l,0])
-    linear_extrude(10)
+    linear_extrude(10+e)
         for(i=[0:120:360]) rotate(i) translate([0,24/2]) circle(d=4);
 
     linear_extrude(5)
@@ -176,4 +178,21 @@ module plateB(l=150){
             for(i=[0:60:360]) rotate(i) translate([24/2,0]) circle(d=4.2);
         }
     }
+    
+    
+    linear_extrude(5+e)
+    difference(){
+        union(){
+            circle(r=a);
+            translate([l,0]) circle(r=a);        
+        }
+        
+        circle(d=10);
+        for(i=[0:60:360]) rotate(i) translate([24/2,0]) circle(d=4.2);
+        translate([l,0]){
+            circle(d=10);
+            for(i=[0:60:360]) rotate(i) translate([24/2,0]) circle(d=4.2);
+        }
+    }
+    
 }

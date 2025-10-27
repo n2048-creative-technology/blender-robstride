@@ -71,7 +71,7 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
     scan_quick: BoolProperty(
         name="Quick Scan",
         description="Probe common IDs only (faster). Disable for full range scan.",
-        default=True,
+        default=False,
     )
 
     def draw(self, context):
@@ -163,19 +163,17 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             )
         except Exception:
             pass
-        # Respect simulation toggle even when connected (scan will merge sim + real)
+        # Respect simulation toggle; scan should merge sim + real when possible
         sim_flag = bool(context.scene.robstride_simulate)
         connected = robstride_can.manager.is_connected()
         robstride_can.manager.set_simulate(sim_flag)
 
-        # If not connected and not simulating, attempt a temporary connection for scanning
+        # If not connected, attempt a temporary connection for scanning (even if sim is enabled)
         temp_connected = False
-        if not (connected or sim_flag):
+        if not connected:
             if robstride_can.manager.connect():
                 temp_connected = True
-            else:
-                self.report({'ERROR'}, "Not connected and failed to connect for scan.")
-                return {'CANCELLED'}
+            # If connection fails, continue; scan() will still return simulated nodes
 
         found = robstride_can.manager.scan()
 
