@@ -145,3 +145,7 @@ Troubleshooting
 - No simulated nodes: Ensure “Show Simulated Nodes” is enabled, then Connect or Scan.
 - No hardware nodes: Confirm Channel/Baudrate, click Connect, then Scan.
 - Deps missing: Use the Install Deps button or run `bash scripts/setup_deps.sh` to populate vendor/.
+
+CI and Releases
+- Build locally: `python scripts/build_addon.py` produces `dist/<slug>-<version>.zip` ready to install in Blender.
+- GitHub Release: push a tag like `v0.1.0` to `origin` and the `build-and-release` workflow will build the zip and publish a release attaching the artifact.
