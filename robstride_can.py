@@ -327,17 +327,6 @@ class RobStrideManager:
         
         if self.connected and self._bus is not None:
             try:
-                if node_id not in self._enabled_nodes:
-                    try:
-                        self._rs_raw_write_param_u32(node_id, 0x7005, 1)
-                        try:
-                            time.sleep(0.02)
-                        except Exception:
-                            pass
-                        self._rs_raw_send(0x03, int(node_id), bytes(8))
-                        self._enabled_nodes.add(node_id)
-                    except Exception:
-                        pass
                 if node_id not in self._pos_mode_nodes:
                     self._rs_raw_write_param_u32(node_id, 0x7005, 1)
                     self._pos_mode_nodes.add(node_id)                    

@@ -1,0 +1,27 @@
+# Pick And Place List
+# Company=
+# Author=
+# eMail=
+#
+# Project=pcb001
+# Date=15:11:46
+# CreatedBy=Fritzing 1.0.1rc.2024-04-08.debian/1.0.1-1build4
+#
+#
+# Coordinates in mils, always center of component
+# Origin 0/0=Lower left corner of PCB
+# Rotation in degree (0-360, math. pos.)
+#
+RefDes,Description,Package,X,Y,Rotation,Side,Mount
+Description: resistance;capacitance;inductance;voltage;current;power;mpn;mn;
+Via3,";;;;;;;;","",1332,281.61,0,Top,MANUAL
+U2,";;;;;;;;","Picoblade-53261-0219",1188.03,215.802,16,Top,SMT
+Via2,";;;;;;;;","",1188,209.61,0,Top,MANUAL
+J2,";;;;;;;;","THT",1367.54,3057.87,-97,Top,THT
+Via5,";;;;;;;;","",1188,137.61,0,Top,MANUAL
+Via4,";;;;;;;;","",1572,161.61,0,Top,MANUAL
+J3,";;;;;;;;","THT",2298.3,2887.09,-62,Top,THT
+U3,";;;;;;;;","Picoblade-53261-0219",365.267,848.241,59,Top,SMT
+J1,";;;;;;;;","THT",497.317,2616.25,-137,Top,THT
+U1,";;;;;;;;","Picoblade-53261-0219",1557.83,163.575,1,Top,SMT
+Via1,";;;;;;;;","",372,833.61,0,Top,MANUAL

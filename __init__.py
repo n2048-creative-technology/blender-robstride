@@ -27,6 +27,56 @@ from . import robstride_can
 from . import deps
 
 
+# --- Helpers to enforce one controller per object in LEARN mode ---
+def _has_learn_conflict(this_node, scene) -> bool:
+    """Return True if another node (different node_id) is learning the same object."""
+    try:
+        obj = getattr(this_node, 'object_ref', None)
+        if not obj:
+            return False
+        this_id = int(getattr(this_node, 'node_id', -1))
+        obj_name = getattr(obj, 'name', None)
+        for n in getattr(scene, 'robstride_nodes', []):
+            try:
+                if int(getattr(n, 'node_id', -2)) == this_id:
+                    continue  # skip self by ID
+            except Exception:
+                pass
+            n_obj = getattr(n, 'object_ref', None)
+            if not n_obj:
+                continue
+            if getattr(n, 'mode', 'RUN') != 'LEARN':
+                continue
+            if getattr(n_obj, 'name', None) == obj_name:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _on_node_mode_update(self, context):
+    # Prevent multiple nodes learning the same object at once
+    if getattr(self, 'mode', 'RUN') == 'LEARN':
+        scene = getattr(context, 'scene', None) or bpy.context.scene
+        if _has_learn_conflict(self, scene):
+            # Revert to RUN if conflict detected
+            try:
+                self.mode = 'RUN'
+            except Exception:
+                pass
+
+
+def _on_node_object_update(self, context):
+    # If node is already in LEARN and object changes to one under control, revert mode
+    if getattr(self, 'mode', 'RUN') == 'LEARN':
+        scene = getattr(context, 'scene', None) or bpy.context.scene
+        if _has_learn_conflict(self, scene):
+            try:
+                self.mode = 'RUN'
+            except Exception:
+                pass
+
+
 class RobStrideAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
@@ -91,7 +141,7 @@ class RobStrideAddonPreferences(bpy.types.AddonPreferences):
 class RobStridenodeNode(bpy.types.PropertyGroup):
     name: StringProperty(name="Name", default="Node")
     node_id: IntProperty(name="ID", default=0, min=0)
-    object_ref: PointerProperty(name="Object", type=bpy.types.Object)
+    object_ref: PointerProperty(name="Object", type=bpy.types.Object, update=_on_node_object_update)
     target_deg: FloatProperty(
         name="Target (deg)",
         description="Target position to send using raw protocol (degrees)",
@@ -104,6 +154,7 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
             ("LEARN", "Learn", "Read encoder and keyframe object Z"),
         ],
         default="RUN",
+        update=_on_node_mode_update,
     )
     kp: FloatProperty(name="Kp", default=1.0)
     ki: FloatProperty(name="Ki", default=0.0)
@@ -290,6 +341,37 @@ class ROBSTRIDE_OT_node_enable(bpy.types.Operator):
     node_id: IntProperty()
 
     def execute(self, context):
+        # Prevent enabling if node is in LEARN mode; enforce disabled state
+        try:
+            scene = context.scene
+            node = next((n for n in scene.robstride_nodes if int(n.node_id) == int(self.node_id)), None)
+        except Exception:
+            node = None
+        if node and node.mode == 'LEARN':
+            prefs = context.preferences.addons[__name__].preferences
+            try:
+                robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            temp = False
+            if not robstride_can.manager.is_connected():
+                if robstride_can.manager.connect():
+                    temp = True
+            try:
+                robstride_can.manager.enable_node(int(self.node_id), False)
+                _enabled_state[int(self.node_id)] = False
+                self.report({'INFO'}, "Node in Learn mode: motor disabled")
+                return {'FINISHED'}
+            except Exception as e:
+                self.report({'ERROR'}, f"Disable in Learn failed: {e}")
+                return {'CANCELLED'}
+            finally:
+                if temp:
+                    try:
+                        robstride_can.manager.disconnect()
+                    except Exception:
+                        pass
+
         prefs = context.preferences.addons[__name__].preferences
         # Ensure host low byte matches scripts and connect if needed
         try:
@@ -302,6 +384,7 @@ class ROBSTRIDE_OT_node_enable(bpy.types.Operator):
                 temp = True
         try:
             robstride_can.manager.enable_node(int(self.node_id), True)
+            _enabled_state[int(self.node_id)] = True
             self.report({'INFO'}, f"Enabled node {int(self.node_id)}")
             return {'FINISHED'}
         except Exception as e:
@@ -335,6 +418,7 @@ class ROBSTRIDE_OT_node_disable(bpy.types.Operator):
                 temp = True
         try:
             robstride_can.manager.enable_node(int(self.node_id), False)
+            _enabled_state[int(self.node_id)] = False
             self.report({'INFO'}, f"Disabled node {int(self.node_id)}")
             return {'FINISHED'}
         except Exception as e:
@@ -555,6 +639,15 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             layout.label(text="No nodes. Click Scan.")
             return
 
+        # Precompute which objects are controlled in LEARN mode
+        learn_by_object = {}
+        try:
+            for n in scene.robstride_nodes:
+                if n.object_ref and n.mode == 'LEARN':
+                    learn_by_object.setdefault(n.object_ref.name, []).append(n)
+        except Exception:
+            learn_by_object = {}
+
         for idx, node in enumerate(scene.robstride_nodes):
             box = layout.box()
             header = box.row(align=True)
@@ -563,16 +656,52 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             online_icon = 'CHECKMARK' if online else 'ERROR'
             header.label(text=f"ID {node.node_id}", icon='DRIVER')
             header.label(text=("Online" if online else "Offline"), icon=online_icon)
+            # Show enabled/disabled state indicator (derived from tracked state and mode)
+            try:
+                en_state = _enabled_state.get(int(node.node_id))
+            except Exception:
+                en_state = None
+            if en_state is None:
+                # Fallback to mode hint if unknown
+                en_state = (node.mode == 'RUN')
+            en_icon = 'PLAY' if (en_state and node.mode != 'LEARN') else 'PAUSE'
+            en_text = 'Enabled' if (en_state and node.mode != 'LEARN') else 'Disabled'
+            header.label(text=en_text, icon=en_icon)
 
             col = box.column(align=True)
             col.prop(node, "object_ref")
-            col.prop(node, "mode", expand=True)
+            # Draw RUN/LEARN as separate toggles so we can disable LEARN per-object
+            row_mode = col.row(align=True)
+            row_mode.prop_enum(node, "mode", "RUN")
+            sub_learn = row_mode.row(align=True)
+            # Disable LEARN if another node already controls the same object
+            learn_conflict = False
+            try:
+                if node.object_ref and node.object_ref.name in learn_by_object:
+                    controllers = learn_by_object[node.object_ref.name]
+                    # treat as conflict if any controller has a different node_id
+                    learn_conflict = any(int(getattr(c, 'node_id', -1)) != int(node.node_id) for c in controllers)
+            except Exception:
+                learn_conflict = False
+            sub_learn.enabled = (not learn_conflict) or (node.mode == 'LEARN')
+            sub_learn.prop_enum(node, "mode", "LEARN")
 
             # Simple raw control buttons based on enable.py/disable.py/move.py
             row_ctl = box.row(align=True)
-            op_en = row_ctl.operator(ROBSTRIDE_OT_node_enable.bl_idname, text="Enable", icon='PLAY')
+            sub_en = row_ctl.row(align=True)
+            sub_en.enabled = (node.mode != 'LEARN')
+            # Highlight Enable/Disable depending on tracked enabled state
+            try:
+                en_state = _enabled_state.get(int(node.node_id))
+            except Exception:
+                en_state = None
+            if en_state is None:
+                en_state = (node.mode == 'RUN')
+            is_enabled_ui = bool(en_state and node.mode != 'LEARN')
+            is_disabled_ui = not is_enabled_ui
+            op_en = sub_en.operator(ROBSTRIDE_OT_node_enable.bl_idname, text="Enable", icon='PLAY', depress=is_enabled_ui)
             op_en.node_id = node.node_id
-            op_dis = row_ctl.operator(ROBSTRIDE_OT_node_disable.bl_idname, text="Disable", icon='PAUSE')
+            op_dis = row_ctl.operator(ROBSTRIDE_OT_node_disable.bl_idname, text="Disable", icon='PAUSE', depress=is_disabled_ui)
             op_dis.node_id = node.node_id
 
             row_mv = box.row(align=True)
@@ -582,9 +711,6 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             op_mv.degrees = node.target_deg
 
             grid = box.grid_flow(columns=2, even_columns=True, even_rows=True)
-            grid.prop(node, "kp")
-            grid.prop(node, "ki")
-            grid.prop(node, "kd")
             grid.prop(node, "scale")
             grid.prop(node, "offset")
             grid.prop(node, "min_rot")
@@ -595,6 +721,7 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
 _last_pid = {}
 _last_out = {}
 _last_mode = {}
+_enabled_state = {}
 
 
 def _send_pid_if_changed(node):
@@ -636,6 +763,139 @@ def _get_anim_z_value(obj, frame):
             except Exception:
                 return None
     return None
+
+
+def _is_animation_playing() -> bool:
+    try:
+        wm = bpy.context.window_manager
+        for win in wm.windows:
+            scr = getattr(win, 'screen', None)
+            if scr and getattr(scr, 'is_animation_playing', False):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# Lightweight timer to update LEARN mode while not playing
+_timer_enabled = False
+_learn_enforced = set()
+
+
+def _robstride_learn_timer():
+    global _timer_enabled
+    global _learn_enforced
+    if not _timer_enabled:
+        return None
+    # If playing, let frame_change handler drive updates + optional keyframing
+    if _is_animation_playing():
+        return 0.1
+
+    try:
+        scene = bpy.context.scene
+    except Exception:
+        return 0.25
+
+    # Skip if no connection and no simulation
+    if not (robstride_can.manager.is_connected() or getattr(scene, 'robstride_simulate', False)):
+        return 0.25
+
+    # Resolve conflicts: only one LEARN controller per object
+    try:
+        seen_by_obj = {}
+        for n in scene.robstride_nodes:
+            if not (n.object_ref and n.mode == 'LEARN'):
+                continue
+            key = n.object_ref.name
+            # Keep the first controller per object; revert others
+            if key not in seen_by_obj:
+                seen_by_obj[key] = int(getattr(n, 'node_id', -1))
+            else:
+                if int(getattr(n, 'node_id', -1)) != seen_by_obj[key]:
+                    try:
+                        n.mode = 'RUN'
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # Ensure motors are disabled in LEARN and request reads for LEARN nodes
+    try:
+        for node in scene.robstride_nodes:
+            if node.mode == 'LEARN':
+                if node.node_id not in _learn_enforced:
+                    try:
+                        robstride_can.manager.enable_node(int(node.node_id), False)
+                    except Exception:
+                        pass
+                    _learn_enforced.add(node.node_id)
+            else:
+                if node.node_id in _learn_enforced:
+                    _learn_enforced.discard(node.node_id)
+            if node.mode != 'LEARN' or not node.object_ref:
+                continue
+            robstride_can.manager.request_read(node.node_id)
+    except Exception:
+        pass
+
+    try:
+        for node in scene.robstride_nodes:
+            if node.mode != 'LEARN' or not node.object_ref:
+                continue
+            obj = node.object_ref
+            pos = robstride_can.manager.get_cached_position(node.node_id)
+            if pos is None:
+                continue
+            z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            try:
+                if node.min_rot < node.max_rot:
+                    if z_rad < node.min_rot:
+                        z_rad = node.min_rot
+                    elif z_rad > node.max_rot:
+                        z_rad = node.max_rot
+            except Exception:
+                pass
+            try:
+                obj.rotation_euler[2] = z_rad
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # RUN mode realtime: push current Z to enabled motors when idle
+    try:
+        for node in scene.robstride_nodes:
+            if node.mode != 'RUN' or not node.object_ref:
+                continue
+            enabled = _enabled_state.get(int(node.node_id))
+            if enabled is False:
+                continue
+            obj = node.object_ref
+            try:
+                z_rad = float(obj.rotation_euler[2])
+            except Exception:
+                continue
+            try:
+                if node.min_rot < node.max_rot:
+                    if z_rad < node.min_rot:
+                        z_rad = node.min_rot
+                    elif z_rad > node.max_rot:
+                        z_rad = node.max_rot
+            except Exception:
+                pass
+            node_units = node.scale * z_rad + node.offset
+            prev = _last_out.get(int(node.node_id))
+            if prev is None or abs(prev - node_units) > 1e-6:
+                try:
+                    robstride_can.manager.send_position(int(node.node_id), node_units)
+                    _last_out[int(node.node_id)] = node_units
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Poll frequently for snappy updates while idle
+    return 0.05
 
 
 def _on_simulate_update(self, context):
@@ -700,6 +960,7 @@ def robstride_sync_handler(scene):
             try:
                 if node.mode == 'LEARN':
                     robstride_can.manager.enable_node(node_id, False)
+                    _enabled_state[node_id] = False
                     # Ensure object uses Euler so Z rotation is keyframable and visible
                     try:
                         obj.rotation_mode = 'XYZ'
@@ -707,6 +968,7 @@ def robstride_sync_handler(scene):
                         pass
                 elif node.mode == 'RUN':
                     robstride_can.manager.enable_node(node_id, True)
+                    _enabled_state[node_id] = True
             except Exception:
                 pass
             _last_mode[node_id] = node.mode
@@ -727,10 +989,12 @@ def robstride_sync_handler(scene):
             node_units = node.scale * z_rad + node.offset
 
             # Send synchronously per frame to mirror move.py timing
-            try:
-                robstride_can.manager.send_position(node_id, node_units)
-            except Exception:
-                pass
+            enabled = _enabled_state.get(int(node_id))
+            if enabled is not False:
+                try:
+                    robstride_can.manager.send_position(node_id, node_units)
+                except Exception:
+                    pass
 
         elif node.mode == 'LEARN':
             # Non-blocking: request a read and use last cached value if available
@@ -753,8 +1017,9 @@ def robstride_sync_handler(scene):
                 pass
             obj.rotation_euler[2] = z_rad
 
-            # Ensure incoming encoder value overrides any existing key at this frame
-            _replace_z_keyframe(obj, scene.frame_current)
+            # Only keyframe during playback; otherwise just update the value
+            if _is_animation_playing():
+                _replace_z_keyframe(obj, scene.frame_current)
 
 
 classes = (
@@ -791,11 +1056,24 @@ def register():
     # Try to ready dependencies up-front
     deps.ensure_dependencies()
 
+    # Start background timer to keep LEARN mode updating while idle
+    global _timer_enabled
+    _timer_enabled = True
+    try:
+        bpy.app.timers.register(_robstride_learn_timer, first_interval=0.1, persistent=True)
+    except TypeError:
+        # Blender < 3.2 lacks persistent kw
+        bpy.app.timers.register(_robstride_learn_timer, first_interval=0.1)
+
 
 def unregister():
     # Remove handler
     if robstride_sync_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(robstride_sync_handler)
+
+    # Stop background timer
+    global _timer_enabled
+    _timer_enabled = False
 
     del bpy.types.Scene.robstride_nodes
     del bpy.types.Scene.robstride_simulate
