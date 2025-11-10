@@ -142,11 +142,6 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
     name: StringProperty(name="Name", default="Node")
     node_id: IntProperty(name="ID", default=0, min=0)
     object_ref: PointerProperty(name="Object", type=bpy.types.Object, update=_on_node_object_update)
-    target_deg: FloatProperty(
-        name="Target (deg)",
-        description="Target position to send using raw protocol (degrees)",
-        default=0.0,
-    )
     mode: EnumProperty(
         name="Mode",
         items=[
@@ -156,9 +151,6 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
         default="RUN",
         update=_on_node_mode_update,
     )
-    kp: FloatProperty(name="Kp", default=1.0)
-    ki: FloatProperty(name="Ki", default=0.0)
-    kd: FloatProperty(name="Kd", default=0.0)
     scale: FloatProperty(
         name="Scale",
         description="Radians in/out (device speaks radians). Keep 1.0 unless you need gearing/scaling.",
@@ -168,16 +160,6 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
         name="Offset",
         description="Radians offset (additive) if needed. Typically 0.0.",
         default=0.0,
-    )
-    min_rot: FloatProperty(
-        name="Min Z (rad)",
-        description="Minimum allowed Z rotation (radians)",
-        default=-6.283185307179586,
-    )
-    max_rot: FloatProperty(
-        name="Max Z (rad)",
-        description="Maximum allowed Z rotation (radians)",
-        default=6.283185307179586,
     )
 
 
@@ -251,6 +233,11 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
                 n = nodes.add()
                 n.name = m_name
                 n.node_id = m_id
+                # Default newly discovered nodes to disabled
+                try:
+                    _enabled_state[int(m_id)] = False
+                except Exception:
+                    pass
 
         # Disconnect if we connected temporarily just for the scan
         if temp_connected:
@@ -323,6 +310,11 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
                 n = nodes.add()
                 n.name = m_name
                 n.node_id = m_id
+                # Default newly discovered nodes to disabled
+                try:
+                    _enabled_state[int(m_id)] = False
+                except Exception:
+                    pass
 
         # Prepare canopen nodes where applicable
         for n in nodes:
@@ -432,41 +424,91 @@ class ROBSTRIDE_OT_node_disable(bpy.types.Operator):
                     pass
 
 
-class ROBSTRIDE_OT_node_move(bpy.types.Operator):
-    bl_idname = "robstride.node_move"
-    bl_label = "Send Target"
-    bl_description = "Send a target position (degrees) to the node"
+class ROBSTRIDE_OT_enable_all(bpy.types.Operator):
+    bl_idname = "robstride.enable_all"
+    bl_label = "Enable All"
+    bl_description = "Enable all nodes currently in Run mode (ignores Learn mode)"
     bl_options = {"REGISTER"}
 
-    node_id: IntProperty()
-    degrees: FloatProperty(name="Degrees", default=0.0)
-
     def execute(self, context):
+        scene = context.scene
         prefs = context.preferences.addons[__name__].preferences
-        # Convert degrees to radians as used by move.py
-        import math
+        # Ensure host low byte matches scripts and connect if needed
         try:
-            try:
-                robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            temp = False
-            if not robstride_can.manager.is_connected():
-                if robstride_can.manager.connect():
-                    temp = True
-            radians = float(self.degrees) * math.pi / 180.0
-            robstride_can.manager.send_position(int(self.node_id), radians)
-            self.report({'INFO'}, f"Node {int(self.node_id)} -> {float(self.degrees):.2f}°")
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        temp = False
+        if not robstride_can.manager.is_connected():
+            if robstride_can.manager.connect():
+                temp = True
+        count = 0
+        try:
+            for n in scene.robstride_nodes:
+                try:
+                    if n.mode != 'RUN':
+                        continue
+                    robstride_can.manager.enable_node(int(n.node_id), True)
+                    _enabled_state[int(n.node_id)] = True
+                    count += 1
+                except Exception:
+                    # Continue enabling others even if one fails
+                    pass
+            self.report({'INFO'}, f"Enabled {count} RUN nodes")
             return {'FINISHED'}
         except Exception as e:
-            self.report({'ERROR'}, f"Send failed: {e}")
+            self.report({'ERROR'}, f"Enable All failed: {e}")
             return {'CANCELLED'}
         finally:
-            if 'temp' in locals() and temp:
+            if temp:
                 try:
                     robstride_can.manager.disconnect()
                 except Exception:
                     pass
+
+
+class ROBSTRIDE_OT_disable_all(bpy.types.Operator):
+    bl_idname = "robstride.disable_all"
+    bl_label = "Disable All"
+    bl_description = "Disable all nodes currently in Run mode (ignores Learn mode)"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        scene = context.scene
+        prefs = context.preferences.addons[__name__].preferences
+        try:
+            robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        temp = False
+        if not robstride_can.manager.is_connected():
+            if robstride_can.manager.connect():
+                temp = True
+        count = 0
+        try:
+            for n in scene.robstride_nodes:
+                try:
+                    if n.mode != 'RUN':
+                        continue
+                    robstride_can.manager.enable_node(int(n.node_id), False)
+                    _enabled_state[int(n.node_id)] = False
+                    count += 1
+                except Exception:
+                    pass
+            self.report({'INFO'}, f"Disabled {count} RUN nodes")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Disable All failed: {e}")
+            return {'CANCELLED'}
+        finally:
+            if temp:
+                try:
+                    robstride_can.manager.disconnect()
+                except Exception:
+                    pass
+
+
+## Removed: manual target send operator
 
 
 class ROBSTRIDE_OT_save_config(bpy.types.Operator):
@@ -505,13 +547,8 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
                 "name": node.name,
                 "object": node.object_ref.name if node.object_ref else "",
                 "mode": node.mode,
-                "kp": float(node.kp),
-                "ki": float(node.ki),
-                "kd": float(node.kd),
                 "scale": float(node.scale),
                 "offset": float(node.offset),
-                "min": float(node.min_rot),
-                "max": float(node.max_rot),
             })
 
         try:
@@ -566,13 +603,13 @@ class ROBSTRIDE_OT_load_config(bpy.types.Operator):
             n.object_ref = bpy.data.objects.get(obj_name) if obj_name else None
             mode = str(m.get("mode", "RUN"))
             n.mode = mode if mode in {"RUN", "LEARN"} else "RUN"
-            n.kp = float(m.get("kp", 0.0))
-            n.ki = float(m.get("ki", 0.0))
-            n.kd = float(m.get("kd", 0.0))
             n.scale = float(m.get("scale", 1.0))
             n.offset = float(m.get("offset", 0.0))
-            n.min_rot = float(m.get("min", -6.283185307179586))
-            n.max_rot = float(m.get("max", 6.283185307179586))
+            # Default loaded nodes to disabled until user enables explicitly
+            try:
+                _enabled_state[int(n.node_id)] = False
+            except Exception:
+                pass
 
         self.report({'INFO'}, f"Loaded config: {self.filepath}")
         return {'FINISHED'}
@@ -626,6 +663,10 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
         row.operator("robstride.connect_toggle", icon=conn_icon, text=("Disconnect" if robstride_can.manager.is_connected() else "Connect"))
         row.operator("robstride.save_config", icon='FILE_TICK', text="Save")
         row.operator("robstride.load_config", icon='FILE_FOLDER', text="Load")
+        # Batch enable/disable for RUN-mode nodes
+        row2 = can_box.row(align=True)
+        row2.operator("robstride.enable_all", icon='PLAY', text="Enable All")
+        row2.operator("robstride.disable_all", icon='PAUSE', text="Disable All")
         # Only show Install Deps if not installed yet (check without side-effects)
         try:
             has_can, has_canopen, _has_rs = deps.have_modules()
@@ -662,8 +703,8 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             except Exception:
                 en_state = None
             if en_state is None:
-                # Fallback to mode hint if unknown
-                en_state = (node.mode == 'RUN')
+                # Default to disabled when unknown
+                en_state = False
             en_icon = 'PLAY' if (en_state and node.mode != 'LEARN') else 'PAUSE'
             en_text = 'Enabled' if (en_state and node.mode != 'LEARN') else 'Disabled'
             header.label(text=en_text, icon=en_icon)
@@ -696,7 +737,8 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             except Exception:
                 en_state = None
             if en_state is None:
-                en_state = (node.mode == 'RUN')
+                # Default to disabled until explicitly enabled
+                en_state = False
             is_enabled_ui = bool(en_state and node.mode != 'LEARN')
             is_disabled_ui = not is_enabled_ui
             op_en = sub_en.operator(ROBSTRIDE_OT_node_enable.bl_idname, text="Enable", icon='PLAY', depress=is_enabled_ui)
@@ -704,36 +746,15 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             op_dis = row_ctl.operator(ROBSTRIDE_OT_node_disable.bl_idname, text="Disable", icon='PAUSE', depress=is_disabled_ui)
             op_dis.node_id = node.node_id
 
-            row_mv = box.row(align=True)
-            row_mv.prop(node, "target_deg")
-            op_mv = row_mv.operator(ROBSTRIDE_OT_node_move.bl_idname, text="Send", icon='TRACKING_FORWARDS')
-            op_mv.node_id = node.node_id
-            op_mv.degrees = node.target_deg
-
             grid = box.grid_flow(columns=2, even_columns=True, even_rows=True)
             grid.prop(node, "scale")
             grid.prop(node, "offset")
-            grid.prop(node, "min_rot")
-            grid.prop(node, "max_rot")
 
 
-# Cache last-sent parameters to reduce bus traffic
-_last_pid = {}
+# Cache last-sent outputs to reduce bus traffic
 _last_out = {}
 _last_mode = {}
 _enabled_state = {}
-
-
-def _send_pid_if_changed(node):
-    key = node.node_id
-    last = _last_pid.get(key)
-    current = (node.kp, node.ki, node.kd)
-    if last != current:
-        try:
-            robstride_can.manager.set_pid(key, *current)
-            _last_pid[key] = current
-        except Exception:
-            pass
 
 
 def _replace_z_keyframe(obj, frame):
@@ -848,14 +869,6 @@ def _robstride_learn_timer():
                 continue
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
             try:
-                if node.min_rot < node.max_rot:
-                    if z_rad < node.min_rot:
-                        z_rad = node.min_rot
-                    elif z_rad > node.max_rot:
-                        z_rad = node.max_rot
-            except Exception:
-                pass
-            try:
                 obj.rotation_euler[2] = z_rad
             except Exception:
                 pass
@@ -868,21 +881,14 @@ def _robstride_learn_timer():
             if node.mode != 'RUN' or not node.object_ref:
                 continue
             enabled = _enabled_state.get(int(node.node_id))
-            if enabled is False:
+            if enabled is not True:
                 continue
             obj = node.object_ref
             try:
                 z_rad = float(obj.rotation_euler[2])
             except Exception:
                 continue
-            try:
-                if node.min_rot < node.max_rot:
-                    if z_rad < node.min_rot:
-                        z_rad = node.min_rot
-                    elif z_rad > node.max_rot:
-                        z_rad = node.max_rot
-            except Exception:
-                pass
+            
             node_units = node.scale * z_rad + node.offset
             prev = _last_out.get(int(node.node_id))
             if prev is None or abs(prev - node_units) > 1e-6:
@@ -914,6 +920,11 @@ def _on_simulate_update(self, context):
                     n = nodes.add()
                     n.node_id = nid
                     n.name = name
+                    # Default simulated nodes to disabled
+                    try:
+                        _enabled_state[int(nid)] = False
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -951,8 +962,7 @@ def robstride_sync_handler(scene):
         if not (robstride_can.manager.is_connected() or scene.robstride_simulate):
             continue
 
-        # Update PID if needed
-        _send_pid_if_changed(node)
+        # PID parameters removed; no PID updates sent
 
         # Handle mode transitions for safe enable/disable
         prev_mode = _last_mode.get(node_id)
@@ -967,8 +977,8 @@ def robstride_sync_handler(scene):
                     except Exception:
                         pass
                 elif node.mode == 'RUN':
-                    robstride_can.manager.enable_node(node_id, True)
-                    _enabled_state[node_id] = True
+                    # Do not auto-enable on entering RUN; default remains disabled
+                    pass
             except Exception:
                 pass
             _last_mode[node_id] = node.mode
@@ -977,20 +987,11 @@ def robstride_sync_handler(scene):
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
             z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])
-            # Clamp to configured bounds if valid
-            # try:
-            #     if node.min_rot < node.max_rot:
-            #         if z_rad < node.min_rot:
-            #             z_rad = node.min_rot
-            #         elif z_rad > node.max_rot:
-            #             z_rad = node.max_rot
-            # except Exception:
-            #     pass
             node_units = node.scale * z_rad + node.offset
 
             # Send synchronously per frame to mirror move.py timing
             enabled = _enabled_state.get(int(node_id))
-            if enabled is not False:
+            if enabled is True:
                 try:
                     robstride_can.manager.send_position(node_id, node_units)
                 except Exception:
@@ -1006,15 +1007,6 @@ def robstride_sync_handler(scene):
 
             # node units -> radians
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
-            # Clamp to configured bounds if valid
-            try:
-                if node.min_rot < node.max_rot:
-                    if z_rad < node.min_rot:
-                        z_rad = node.min_rot
-                    elif z_rad > node.max_rot:
-                        z_rad = node.max_rot
-            except Exception:
-                pass
             obj.rotation_euler[2] = z_rad
 
             # Only keyframe during playback; otherwise just update the value
@@ -1029,7 +1021,8 @@ classes = (
     ROBSTRIDE_OT_connect_toggle,
     ROBSTRIDE_OT_node_enable,
     ROBSTRIDE_OT_node_disable,
-    ROBSTRIDE_OT_node_move,
+    ROBSTRIDE_OT_enable_all,
+    ROBSTRIDE_OT_disable_all,
     ROBSTRIDE_OT_save_config,
     ROBSTRIDE_OT_load_config,
     ROBSTRIDE_OT_install_deps,

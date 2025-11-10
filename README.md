@@ -13,7 +13,7 @@ Features
 - Per-node editable Name and persistent node ID
 - Run mode: stream animated Z rotation to the node during playback
 - Learn mode: read encoder and keyframe the object’s Z rotation on every frame
-- PID gains (Kp, Ki, Kd), scale, and offset per node
+- Per-node scale and offset
 - Save/Load full configuration as JSON
 - Simulation toggle to create two virtual nodes when hardware is unavailable
 - Connect/Disconnect to manage the CAN connection explicitly
@@ -71,7 +71,7 @@ Open View3D > Sidebar (N) > RobStride.
   - Online/Offline: current node status
   - Object: link a Blender object to this node
   - Mode: Run or Learn
-  - Parameters: Kp, Ki, Kd (defaults 1, 0, 0), Scale, Offset, Min Z, Max Z (radians)
+  - Parameters: Scale, Offset (radians)
 
 Run vs Learn Behavior
 - Run Mode
@@ -92,7 +92,7 @@ Scan, Connect, and Status
 Save/Load Configuration
 - Save writes a JSON file containing:
   - CAN settings: interface (stored but hidden in the panel), channel, bitrate
-  - nodes: for each node — id, name, linked object name, mode, kp, ki, kd, scale, offset
+  - nodes: for each node — id, name, linked object name, mode, scale, offset
 - Load reads the JSON, applies CAN preferences, replaces the node list, and relinks objects by name if they exist in the scene.
 
 Example schema:
@@ -100,7 +100,7 @@ Example schema:
   "can": {"interface": "robstride", "channel": "can0", "bitrate": 1000000},
   "nodes": [
     {"id": 1, "name": "Shoulder", "object": "Armature.L", "mode": "RUN",
-     "kp": 1.0, "ki": 0.0, "kd": 0.0, "scale": 1.0, "offset": 0.0}
+     "scale": 1.0, "offset": 0.0}
   ]
 }
 
@@ -109,9 +109,9 @@ Code Structure
   - Add-on entry (bl_info), registration, UI Panel (ROBSTRIDE_PT_panel)
   - Operators: Scan, Save Config, Load Config, Install Deps, Connect/Disconnect
   - Properties: Scene.robstride_nodes (collection), Scene.robstride_simulate (bool)
-  - PropertyGroup: RobStridenodeNode (name, node_id, object_ref, mode, kp/ki/kd, scale, offset)
+  - PropertyGroup: RobStridenodeNode (name, node_id, object_ref, mode, scale, offset)
   - Handler: robstride_sync_handler runs on frame change during playback to implement Run/Learn logic
-  - Helpers: _send_pid_if_changed, _replace_z_keyframe, _get_anim_z_value
+  - Helpers: _replace_z_keyframe, _get_anim_z_value
 
 - robstride_can.py
   - RobStrideManager: abstraction for CAN/CANopen/robstride-lib
@@ -119,7 +119,7 @@ Code Structure
     - connect()/disconnect()/is_connected(): manage connection
     - scan(): discover nodes (simulation honors the panel toggle)
     - prepare_node(), node_status(): set up and report CANopen node status
-    - set_pid(), enable_node(), send_position(), read_position():
+    - enable_node(), send_position(), read_position():
       - Prefer robstride library if available (placeholders)
       - Fallback to CANopen SDOs (uses common CiA-402 indices; adjust to your spec)
       - Simulation: stores/synthesizes positions
@@ -137,7 +137,7 @@ Code Structure
 Safety and Notes
 - Run mode sends motion commands; ensure your hardware is safe to move.
 - Learn mode disables the node and records incoming encoder values as keyframes.
-- PID indices and some CANopen details are placeholders; provide your RobStride device spec/EDS to finalize.
+- Some CANopen details are placeholders; provide your RobStride device spec/EDS to finalize.
 - The add-on hides the “CAN Interface” in the UI but stores it in the JSON and Add-on Preferences; adjust there if you need a different backend.
 
 Troubleshooting
