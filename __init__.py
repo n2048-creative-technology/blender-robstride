@@ -507,10 +507,6 @@ class ROBSTRIDE_OT_disable_all(bpy.types.Operator):
                 except Exception:
                     pass
 
-
-## Removed: manual target send operator
-
-
 class ROBSTRIDE_OT_save_config(bpy.types.Operator):
     bl_idname = "robstride.save_config"
     bl_label = "Save Config"
