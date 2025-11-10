@@ -799,6 +799,75 @@ _timer_enabled = False
 _learn_enforced = set()
 
 
+def _get_z_limits(obj):
+    """Return (min_z, max_z) in radians from active Limit Rotation constraints.
+    Intersects multiple constraints; returns None if no Z limits present.
+    """
+    try:
+        cons = getattr(obj, 'constraints', [])
+    except Exception:
+        cons = []
+    min_z = None
+    max_z = None
+    for c in cons:
+        try:
+            if getattr(c, 'type', '') != 'LIMIT_ROTATION':
+                continue
+            if not bool(getattr(c, 'use_limit_z', False)):
+                continue
+            if bool(getattr(c, 'mute', False)):
+                continue
+            if float(getattr(c, 'influence', 1.0)) <= 0.0:
+                continue
+            cmin = float(getattr(c, 'min_z', float('-inf')))
+            cmax = float(getattr(c, 'max_z', float('inf')))
+            min_z = cmin if min_z is None else max(min_z, cmin)
+            max_z = cmax if max_z is None else min(max_z, cmax)
+        except Exception:
+            # Ignore malformed constraints; continue intersecting others
+            pass
+    if min_z is None and max_z is None:
+        return None
+    # If limits are inverted due to user input, normalize by swapping
+    if (min_z is not None) and (max_z is not None) and (min_z > max_z):
+        min_z, max_z = max_z, min_z
+    return (
+        (min_z if min_z is not None else float('-inf')),
+        (max_z if max_z is not None else float('inf')),
+    )
+
+
+def _clamp_z_to_limits(obj, z_rad):
+    """Clamp z_rad (radians) to any Limit Rotation Z constraints on the object."""
+    limits = _get_z_limits(obj)
+    if not limits:
+        return z_rad
+    zmin, zmax = limits
+    if z_rad < zmin:
+        return zmin
+    if z_rad > zmax:
+        return zmax
+    return z_rad
+
+
+def _get_evaluated_z(obj):
+    """Return object's Z rotation (radians) after constraints, from depsgraph.
+    Prefers local space via matrix_local, falls back to evaluated rotation_euler.
+    Returns None if not available.
+    """
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        obj_eval = obj.evaluated_get(depsgraph)
+        rot_mode = getattr(obj, 'rotation_mode', 'XYZ')
+        try:
+            # Local rotation including constraints/parents
+            return float(obj_eval.matrix_local.to_euler(rot_mode)[2])
+        except Exception:
+            return float(obj_eval.rotation_euler[2])
+    except Exception:
+        return None
+
+
 def _robstride_learn_timer():
     global _timer_enabled
     global _learn_enforced
@@ -880,11 +949,15 @@ def _robstride_learn_timer():
             if enabled is not True:
                 continue
             obj = node.object_ref
-            try:
-                z_rad = float(obj.rotation_euler[2])
-            except Exception:
-                continue
+            # Prefer evaluated rotation (post-constraints); fallback to raw property
+            z_eval = _get_evaluated_z(obj)
+            if z_eval is None:
+                try:
+                    z_eval = float(obj.rotation_euler[2])
+                except Exception:
+                    continue
             
+            z_rad = _clamp_z_to_limits(obj, float(z_eval))
             node_units = node.scale * z_rad + node.offset
             prev = _last_out.get(int(node.node_id))
             if prev is None or abs(prev - node_units) > 1e-6:
@@ -982,7 +1055,14 @@ def robstride_sync_handler(scene):
         if node.mode == 'RUN':
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
-            z_rad = z_from_anim if z_from_anim is not None else float(obj.rotation_euler[2])
+            # Prefer evaluated rotation (post-constraints). If unavailable, use animated/raw.
+            z_eval = _get_evaluated_z(obj)
+            if z_eval is None:
+                try:
+                    z_eval = float(z_from_anim) if z_from_anim is not None else float(obj.rotation_euler[2])
+                except Exception:
+                    z_eval = float(obj.rotation_euler[2])
+            z_rad = _clamp_z_to_limits(obj, float(z_eval))
             node_units = node.scale * z_rad + node.offset
 
             # Send synchronously per frame to mirror move.py timing
