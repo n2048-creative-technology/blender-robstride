@@ -21,6 +21,7 @@ from bpy.props import (
 )
 import json
 import os
+import math
 
 # Local module providing CAN communication (stubbed if python-can not available)
 from . import robstride_can
@@ -197,16 +198,14 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
         except Exception:
             pass
         # Respect simulation toggle; scan should merge sim + real when possible
-        sim_flag = bool(context.scene.robstride_simulate)
         connected = robstride_can.manager.is_connected()
-        robstride_can.manager.set_simulate(sim_flag)
 
-        # If not connected, attempt a temporary connection for scanning (even if sim is enabled)
+        # If not connected, attempt a temporary connection for scanning
         temp_connected = False
         if not connected:
             if robstride_can.manager.connect():
                 temp_connected = True
-            # If connection fails, continue; scan() will still return simulated nodes
+            # If connection fails, continue; scan() may still return known nodes
 
         found = robstride_can.manager.scan()
 
@@ -275,7 +274,6 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
             robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
         except Exception:
             pass
-        robstride_can.manager.set_simulate(bool(scene.robstride_simulate))
         # Scan options for raw protocol
         try:
             robstride_can.manager.set_scan_options(
@@ -646,7 +644,7 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
         col.prop(prefs, "interface")
         col.prop(prefs, "channel")
         col.prop(prefs, "bitrate")
-        col.prop(scene, "robstride_simulate", text="Show Simulated Nodes")
+        # Simulation removed: real hardware only
         # Connection status only
         net_row = can_box.row(align=True)
         connected = robstride_can.manager.is_connected()
@@ -746,11 +744,104 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             grid.prop(node, "scale")
             grid.prop(node, "offset")
 
+            # Show constraint limits and whether clamping is currently active
+            try:
+                if node.object_ref:
+                    try:
+                        limits = _get_z_limits(node.object_ref)
+                    except Exception:
+                        limits = None
+                    if limits:
+                        zmin, zmax = limits
+                        lim_row = box.row(align=True)
+                        lim_row.label(text=f"Limits Z: {_fmt_deg(zmin)} .. {_fmt_deg(zmax)}", icon='CON_ROTLIMIT')
+
+                        # RUN direction: check current intended object Z vs limits
+                        if node.mode == 'RUN':
+                            try:
+                                z_eval = _get_evaluated_z(node.object_ref)
+                                if z_eval is None:
+                                    z_eval = float(node.object_ref.rotation_euler[2])
+                                if not (zmin <= float(z_eval) <= zmax):
+                                    clamp_row = box.row(align=True)
+                                    side = 'below min' if float(z_eval) < zmin else 'above max'
+                                    clamp_row.label(text=f"RUN clamping active ({side})", icon='ERROR')
+                            except Exception:
+                                pass
+
+                        # LEARN direction: check last cached motor-derived Z vs limits
+                        if node.mode == 'LEARN':
+                            try:
+                                pos = robstride_can.manager.get_cached_position(node.node_id)
+                                if pos is not None:
+                                    z_raw = (float(pos) - float(node.offset)) / float(node.scale) if float(node.scale) != 0.0 else 0.0
+                                    if not (zmin <= z_raw <= zmax):
+                                        clamp_row = box.row(align=True)
+                                        side = 'below min' if z_raw < zmin else 'above max'
+                                        clamp_row.label(text=f"LEARN clamping active ({side})", icon='ERROR')
+                            except Exception:
+                                pass
+            except Exception:
+                # Ensure one bad node doesn't break the panel drawing
+                pass
+
 
 # Cache last-sent outputs to reduce bus traffic
 _last_out = {}
 _last_mode = {}
 _enabled_state = {}
+
+# Continuous Z unwrapping per node_id
+_unwrap_prev = {}
+_unwrap_accum = {}
+
+
+def _unwrap_update(node_id: int, angle_rad: float) -> float:
+    """Return a continuous (unwrapped) Z angle for the given node.
+    Stores state per node_id to avoid truncation to [-pi, pi].
+    """
+    try:
+        key = int(node_id)
+    except Exception:
+        key = node_id
+    prev = _unwrap_prev.get(key)
+    if prev is None:
+        _unwrap_prev[key] = float(angle_rad)
+        _unwrap_accum[key] = float(angle_rad)
+        return float(angle_rad)
+    # Minimal signed delta across wrap boundary
+    diff = float(angle_rad) - float(prev)
+    twopi = 2.0 * math.pi
+    diff = (diff + math.pi) % twopi - math.pi
+    accum = float(_unwrap_accum.get(key, 0.0)) + diff
+    _unwrap_prev[key] = float(angle_rad)
+    _unwrap_accum[key] = float(accum)
+    return float(accum)
+
+
+def _unwrap_reset(node_id: int, angle_rad: float | None = None) -> None:
+    """Reset unwrapping state for a node, optionally to a specific angle."""
+    try:
+        key = int(node_id)
+    except Exception:
+        key = node_id
+    if angle_rad is None:
+        _unwrap_prev.pop(key, None)
+        _unwrap_accum.pop(key, None)
+        return
+    _unwrap_prev[key] = float(angle_rad)
+    _unwrap_accum[key] = float(angle_rad)
+
+
+def _fmt_deg(val: float) -> str:
+    """Format radians as degrees, handling infinities gracefully for UI."""
+    try:
+        d = math.degrees(float(val))
+        if math.isfinite(d):
+            return f"{d:.1f}°"
+        return "+∞" if d > 0 else "-∞" if d < 0 else "nan"
+    except Exception:
+        return "?"
 
 
 def _replace_z_keyframe(obj, frame):
@@ -882,8 +973,8 @@ def _robstride_learn_timer():
     except Exception:
         return 0.25
 
-    # Skip if no connection and no simulation
-    if not (robstride_can.manager.is_connected() or getattr(scene, 'robstride_simulate', False)):
+    # Skip if not connected
+    if not robstride_can.manager.is_connected():
         return 0.25
 
     # Resolve conflicts: only one LEARN controller per object
@@ -933,6 +1024,7 @@ def _robstride_learn_timer():
             if pos is None:
                 continue
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            z_rad = _clamp_z_to_limits(obj, float(z_rad))
             try:
                 obj.rotation_euler[2] = z_rad
             except Exception:
@@ -956,9 +1048,11 @@ def _robstride_learn_timer():
                     z_eval = float(obj.rotation_euler[2])
                 except Exception:
                     continue
-            
-            z_rad = _clamp_z_to_limits(obj, float(z_eval))
-            node_units = node.scale * z_rad + node.offset
+
+            # Unwrap first for continuity across Euler wrap, then clamp to limits
+            z_cont = _unwrap_update(int(node.node_id), float(z_eval))
+            z_sat = _clamp_z_to_limits(obj, float(z_cont))
+            node_units = node.scale * z_sat + node.offset
             prev = _last_out.get(int(node.node_id))
             if prev is None or abs(prev - node_units) > 1e-6:
                 try:
@@ -973,29 +1067,7 @@ def _robstride_learn_timer():
     return 0.05
 
 
-def _on_simulate_update(self, context):
-    # Keep manager's simulate flag in sync and ensure simulated nodes appear
-    try:
-        robstride_can.manager.set_simulate(bool(self.robstride_simulate))
-    except Exception:
-        pass
-    if getattr(self, 'robstride_simulate', False):
-        try:
-            nodes = self.robstride_nodes
-            existing = {n.node_id for n in nodes}
-            sim_defs = [(1, "Sim node 1"), (2, "Sim node 2")]
-            for nid, name in sim_defs:
-                if nid not in existing:
-                    n = nodes.add()
-                    n.node_id = nid
-                    n.name = name
-                    # Default simulated nodes to disabled
-                    try:
-                        _enabled_state[int(nid)] = False
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+# Simulation removed: no-op
 
 
 @persistent
@@ -1013,9 +1085,9 @@ def robstride_sync_handler(scene):
     except Exception:
         pass
 
-    # If not connected and not simulating, try to connect so RUN mode can drive motors
+    # If not connected, try to connect so RUN mode can drive motors
     try:
-        if not robstride_can.manager.is_connected() and not bool(scene.robstride_simulate):
+        if not robstride_can.manager.is_connected():
             robstride_can.manager.connect()
     except Exception:
         pass
@@ -1027,8 +1099,8 @@ def robstride_sync_handler(scene):
         obj = node.object_ref
         node_id = node.node_id
 
-        # Skip if not connected and not simulating
-        if not (robstride_can.manager.is_connected() or scene.robstride_simulate):
+        # Skip if not connected
+        if not robstride_can.manager.is_connected():
             continue
 
         # PID parameters removed; no PID updates sent
@@ -1045,9 +1117,21 @@ def robstride_sync_handler(scene):
                         obj.rotation_mode = 'XYZ'
                     except Exception:
                         pass
+                    # Reset unwrapping when entering LEARN
+                    try:
+                        _unwrap_reset(node_id)
+                    except Exception:
+                        pass
                 elif node.mode == 'RUN':
                     # Do not auto-enable on entering RUN; default remains disabled
-                    pass
+                    # Initialize unwrapping at current evaluated angle to avoid jumps
+                    try:
+                        z_eval = _get_evaluated_z(obj)
+                        if z_eval is None:
+                            z_eval = float(obj.rotation_euler[2])
+                        _unwrap_reset(node_id, float(z_eval))
+                    except Exception:
+                        pass
             except Exception:
                 pass
             _last_mode[node_id] = node.mode
@@ -1062,8 +1146,10 @@ def robstride_sync_handler(scene):
                     z_eval = float(z_from_anim) if z_from_anim is not None else float(obj.rotation_euler[2])
                 except Exception:
                     z_eval = float(obj.rotation_euler[2])
-            z_rad = _clamp_z_to_limits(obj, float(z_eval))
-            node_units = node.scale * z_rad + node.offset
+            # Unwrap first for continuity across Euler wrap, then clamp to limits
+            z_cont = _unwrap_update(int(node_id), float(z_eval))
+            z_sat = _clamp_z_to_limits(obj, float(z_cont))
+            node_units = node.scale * z_sat + node.offset
 
             # Send synchronously per frame to mirror move.py timing
             enabled = _enabled_state.get(int(node_id))
@@ -1083,6 +1169,7 @@ def robstride_sync_handler(scene):
 
             # node units -> radians
             z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            z_rad = _clamp_z_to_limits(obj, float(z_rad))
             obj.rotation_euler[2] = z_rad
 
             # Only keyframe during playback; otherwise just update the value
@@ -1111,12 +1198,6 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.robstride_nodes = CollectionProperty(type=RobStridenodeNode)
-    bpy.types.Scene.robstride_simulate = BoolProperty(
-        name="Simulate",
-        description="When enabled, show and use simulated nodes instead of requiring real hardware",
-        default=False,
-        update=_on_simulate_update,
-    )
 
     # Install handler
     if robstride_sync_handler not in bpy.app.handlers.frame_change_post:
@@ -1145,7 +1226,6 @@ def unregister():
     _timer_enabled = False
 
     del bpy.types.Scene.robstride_nodes
-    del bpy.types.Scene.robstride_simulate
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

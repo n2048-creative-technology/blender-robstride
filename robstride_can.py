@@ -38,7 +38,6 @@ class RobStrideManager:
         self._nodes = {}
         self._stub_last: Dict[int, float] = {}
         self._stub_phase = 0.0
-        self.simulate = False
         self.connected = False
         self._rs_client = None
         self._enabled_nodes = set()
@@ -105,7 +104,7 @@ class RobStrideManager:
         self._prefer_vendor = bool(value)
 
     def scan(self) -> List[Dict[str, Any]]:
-        # If connected, collect real nodes; if simulate is enabled, always include simulated nodes too
+        # If connected, collect real nodes
         results: List[Dict[str, Any]] = []
         real_ids = set()
         if self.connected:
@@ -205,16 +204,6 @@ class RobStrideManager:
                 except Exception:
                     pass
 
-        # If simulation toggle is on, add simulated nodes (deduplicated)
-        if self.simulate:
-            sim_nodes = [
-                {"id": 1, "name": "Sim node 1"},
-                {"id": 2, "name": "Sim node 2"},
-            ]
-            for m in sim_nodes:
-                if int(m["id"]) not in real_ids:
-                    results.append(m)
-
         return results
 
     def set_scan_options(self, min_id: int | None = None, max_id: int | None = None, quick: bool | None = None) -> None:
@@ -288,8 +277,6 @@ class RobStrideManager:
             except Exception:
                 pass
 
-        if self.simulate:
-            return
         # Raw protocol fallback: map to run_mode (0: idle, 1: position)
         if self.connected and self._bus is not None:
             try:
@@ -321,10 +308,6 @@ class RobStrideManager:
 
     def send_position(self, node_id: int, value: float) -> None:
         # RAW first (matches move.py), then CANopen, then vendor client
-        if self.simulate:
-            self._stub_last[node_id] = float(value)
-            return
-        
         if self.connected and self._bus is not None:
             try:
                 if node_id not in self._pos_mode_nodes:
@@ -378,11 +361,6 @@ class RobStrideManager:
                 return int.from_bytes(pos_bytes, 'little', signed=True)
             except Exception:
                 pass
-
-        if self.simulate:
-            base = self._stub_last.get(node_id, 0.0)
-            self._stub_phase += 0.1
-            return base + 0.1 * math.sin(self._stub_phase)
 
         # Raw protocol fallback: read mechpos (0x7019) as float32
         if self.connected and self._bus is not None:
@@ -531,9 +509,6 @@ class RobStrideManager:
             self._nodes[node_id] = node
         return node
 
-    def set_simulate(self, value: bool) -> None:
-        self.simulate = bool(value)
-
     # Connection management
     def connect(self) -> bool:
         # Always attempt to open the real bus regardless of simulation flag
@@ -562,12 +537,9 @@ class RobStrideManager:
         self._stop_worker()
 
     def is_connected(self) -> bool:
-        # Real connection state (simulation handled separately by UI)
         return bool(self.connected)
 
     def prepare_node(self, node_id: int) -> None:
-        if self.simulate:
-            return
         if self._co_net is not None and canopen is not None:
             try:
                 self._get_or_add_node(node_id)
@@ -576,29 +548,14 @@ class RobStrideManager:
 
     def node_status(self, node_id: int) -> bool:
         # With RobStride, assume online when connected (no heartbeat implemented here)
-        if self.connected:
-            return True
-        if self.simulate:
-            return True
-        return False
+        return bool(self.connected)
 
     # --- Async API for Blender handler ---
     def post_position(self, node_id: int, value: float) -> None:
-        if self.simulate and not self.connected:
-            with self._lock:
-                self._stub_last[node_id] = float(value)
-            return
         with self._lock:
             self._pending_pos[node_id] = float(value)
 
     def request_read(self, node_id: int) -> None:
-        if self.simulate and not self.connected:
-            # synthesize position
-            with self._lock:
-                base = self._stub_last.get(node_id, 0.0)
-                self._stub_phase += 0.1
-                self._last_read_pos[node_id] = base + 0.1 * math.sin(self._stub_phase)
-            return
         with self._lock:
             self._pending_reads.add(int(node_id))
 
@@ -634,7 +591,7 @@ class RobStrideManager:
                 read_ids = list(self._pending_reads)
                 self._pending_reads.clear()
 
-            # Send positions (RAW -> CANopen -> vendor, else simulate)
+            # Send positions (RAW -> CANopen -> vendor)
             for node_id, value in pos_items:
                 try:
                     sent = False
@@ -672,14 +629,12 @@ class RobStrideManager:
                             sent = True
                         except Exception:
                             sent = False
-                    if not sent:
-                        with self._lock:
-                            self._stub_last[node_id] = float(value)
+                    # If not sent, drop on floor; nothing to simulate
                 except Exception:
                     # Never crash the worker
                     pass
 
-            # Perform reads (RAW -> CANopen -> vendor, else simulate)
+            # Perform reads (RAW -> CANopen -> vendor)
             for node_id in read_ids:
                 try:
                     got = False
@@ -710,11 +665,7 @@ class RobStrideManager:
                             got = True
                         except Exception:
                             got = False
-                    if not got:
-                        with self._lock:
-                            base = self._stub_last.get(node_id, 0.0)
-                            self._stub_phase += 0.1
-                            self._last_read_pos[node_id] = base + 0.1 * math.sin(self._stub_phase)
+                    # If not got, keep previous cached value (do not synthesize)
                 except Exception:
                     pass
 
