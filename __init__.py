@@ -1071,7 +1071,7 @@ def _robstride_learn_timer():
 
 
 @persistent
-def robstride_sync_handler(scene):
+def robstride_sync_handler(scene,depsgraph=None):
     # Run on every frame change; avoids relying on context.screen in handlers
 
     # Keep host ID (low byte) synced from preferences so raw frames match scripts
