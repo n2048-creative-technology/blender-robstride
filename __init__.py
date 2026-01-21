@@ -845,10 +845,14 @@ def _fmt_deg(val: float) -> str:
 
 
 def _replace_z_keyframe(obj, frame):
-    ad = getattr(obj, 'animation_data', None)
+    try:
+        ad = obj.animation_data_create()
+        if ad.action is None:
+            ad.action = bpy.data.actions.new(name=f"{obj.name}Action")
+    except Exception:
+        ad = getattr(obj, 'animation_data', None)
     if ad and ad.action:
-        fcurves = ad.action.fcurves
-        for fc in fcurves:
+        for fc in _iter_action_fcurves(ad.action):
             if fc.data_path == 'rotation_euler' and fc.array_index == 2:
                 # Remove any keyframe at the current frame so the new one takes priority
                 remove = [kp for kp in fc.keyframe_points if abs(kp.co.x - frame) < 1e-5]
@@ -857,20 +861,61 @@ def _replace_z_keyframe(obj, frame):
                 fc.update()
                 break
     # Insert the new keyframe for Z rotation at this frame
-    obj.keyframe_insert(data_path="rotation_euler", index=2)
+    try:
+        obj.keyframe_insert(data_path="rotation_euler", index=2, frame=frame)
+    except Exception:
+        obj.keyframe_insert(data_path="rotation_euler", index=2)
 
 
 def _get_anim_z_value(obj, frame):
     ad = getattr(obj, 'animation_data', None)
     if not (ad and ad.action):
         return None
-    for fc in ad.action.fcurves:
+    for fc in _iter_action_fcurves(ad.action):
         if fc.data_path == 'rotation_euler' and fc.array_index == 2:
             try:
                 return float(fc.evaluate(frame))
             except Exception:
                 return None
     return None
+
+
+def _iter_action_fcurves(action):
+    """Yield fcurves from an Action across Blender versions."""
+    try:
+        fcurves = getattr(action, "fcurves", None)
+        if fcurves is not None:
+            for fc in fcurves:
+                yield fc
+            return
+    except Exception:
+        pass
+    try:
+        curves = getattr(action, "curves", None)
+        if curves is not None:
+            for fc in curves:
+                yield fc
+            return
+    except Exception:
+        pass
+    try:
+        layers = getattr(action, "layers", None)
+        if layers:
+            for layer in layers:
+                strips = getattr(layer, "strips", None)
+                if not strips:
+                    continue
+                for strip in strips:
+                    bag = getattr(strip, "channelbag", None)
+                    if bag is None:
+                        continue
+                    fcurves = getattr(bag, "fcurves", None)
+                    if not fcurves:
+                        continue
+                    for fc in fcurves:
+                        yield fc
+    except Exception:
+        pass
 
 
 def _is_animation_playing() -> bool:
@@ -986,7 +1031,7 @@ def _robstride_learn_timer():
     if not robstride_can.manager.is_connected():
         return 0.25
 
-    # During playback, only drive RUN updates to avoid conflicting with keyframing
+    # During playback, drive RUN updates and still allow LEARN keyframing
     if playing:
         try:
             for node in scene.robstride_nodes:
@@ -1014,6 +1059,62 @@ def _robstride_learn_timer():
                         pass
         except Exception:
             pass
+
+        # LEARN updates + keyframing during playback
+        try:
+            seen_by_obj = {}
+            for n in scene.robstride_nodes:
+                if not (n.object_ref and n.mode == 'LEARN'):
+                    continue
+                key = n.object_ref.name
+                if key not in seen_by_obj:
+                    seen_by_obj[key] = int(getattr(n, 'node_id', -1))
+                else:
+                    if int(getattr(n, 'node_id', -1)) != seen_by_obj[key]:
+                        try:
+                            n.mode = 'RUN'
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        try:
+            for node in scene.robstride_nodes:
+                if node.mode == 'LEARN':
+                    if node.node_id not in _learn_enforced:
+                        try:
+                            robstride_can.manager.enable_node(int(node.node_id), False)
+                        except Exception:
+                            pass
+                        _learn_enforced.add(node.node_id)
+                else:
+                    if node.node_id in _learn_enforced:
+                        _learn_enforced.discard(node.node_id)
+                if node.mode != 'LEARN' or not node.object_ref:
+                    continue
+                robstride_can.manager.request_read(node.node_id)
+        except Exception:
+            pass
+
+        try:
+            for node in scene.robstride_nodes:
+                if node.mode != 'LEARN' or not node.object_ref:
+                    continue
+                obj = node.object_ref
+                pos = robstride_can.manager.get_cached_position(node.node_id)
+                if pos is None:
+                    continue
+                z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+                z_rad = _clamp_z_to_limits(obj, float(z_rad))
+                try:
+                    obj.rotation_euler[2] = z_rad
+                    if _auto_keying_enabled(scene):
+                        _replace_z_keyframe(obj, scene.frame_current)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return 0.02
 
     # Resolve conflicts: only one LEARN controller per object
