@@ -885,6 +885,16 @@ def _is_animation_playing() -> bool:
     return False
 
 
+def _auto_keying_enabled(scene=None) -> bool:
+    try:
+        if scene is None:
+            scene = bpy.context.scene
+        ts = getattr(scene, 'tool_settings', None)
+        return bool(getattr(ts, 'use_keyframe_insert_auto', False))
+    except Exception:
+        return False
+
+
 # Lightweight timer to update LEARN mode while not playing
 _timer_enabled = False
 _learn_enforced = set()
@@ -1056,6 +1066,8 @@ def _robstride_learn_timer():
             z_rad = _clamp_z_to_limits(obj, float(z_rad))
             try:
                 obj.rotation_euler[2] = z_rad
+                if _auto_keying_enabled(scene):
+                    _replace_z_keyframe(obj, scene.frame_current)
             except Exception:
                 pass
     except Exception:
@@ -1204,8 +1216,8 @@ def robstride_sync_handler(scene,depsgraph=None):
             z_rad = _clamp_z_to_limits(obj, float(z_rad))
             obj.rotation_euler[2] = z_rad
 
-            # Only keyframe during playback; otherwise just update the value
-            if _is_animation_playing():
+            # Keyframe if auto keying is enabled
+            if _auto_keying_enabled(scene):
                 _replace_z_keyframe(obj, scene.frame_current)
 
 
