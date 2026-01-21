@@ -941,13 +941,14 @@ def _clamp_z_to_limits(obj, z_rad):
     return z_rad
 
 
-def _get_evaluated_z(obj):
+def _get_evaluated_z(obj, depsgraph=None):
     """Return object's Z rotation (radians) after constraints, from depsgraph.
     Prefers local space via matrix_local, falls back to evaluated rotation_euler.
     Returns None if not available.
     """
     try:
-        depsgraph = bpy.context.evaluated_depsgraph_get()
+        if depsgraph is None:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
         obj_eval = obj.evaluated_get(depsgraph)
         rot_mode = getattr(obj, 'rotation_mode', 'XYZ')
         try:
@@ -964,9 +965,7 @@ def _robstride_learn_timer():
     global _learn_enforced
     if not _timer_enabled:
         return None
-    # If playing, let frame_change handler drive updates + optional keyframing
-    if _is_animation_playing():
-        return 0.1
+    playing = _is_animation_playing()
 
     try:
         scene = bpy.context.scene
@@ -976,6 +975,36 @@ def _robstride_learn_timer():
     # Skip if not connected
     if not robstride_can.manager.is_connected():
         return 0.25
+
+    # During playback, only drive RUN updates to avoid conflicting with keyframing
+    if playing:
+        try:
+            for node in scene.robstride_nodes:
+                if node.mode != 'RUN' or not node.object_ref:
+                    continue
+                enabled = _enabled_state.get(int(node.node_id))
+                if enabled is not True:
+                    continue
+                obj = node.object_ref
+                z_eval = _get_evaluated_z(obj)
+                if z_eval is None:
+                    try:
+                        z_eval = float(obj.rotation_euler[2])
+                    except Exception:
+                        continue
+                z_cont = _unwrap_update(int(node.node_id), float(z_eval))
+                z_sat = _clamp_z_to_limits(obj, float(z_cont))
+                node_units = node.scale * z_sat + node.offset
+                prev = _last_out.get(int(node.node_id))
+                if prev is None or abs(prev - node_units) > 1e-6:
+                    try:
+                        robstride_can.manager.send_position(int(node.node_id), node_units)
+                        _last_out[int(node.node_id)] = node_units
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return 0.02
 
     # Resolve conflicts: only one LEARN controller per object
     try:
@@ -1126,7 +1155,7 @@ def robstride_sync_handler(scene,depsgraph=None):
                     # Do not auto-enable on entering RUN; default remains disabled
                     # Initialize unwrapping at current evaluated angle to avoid jumps
                     try:
-                        z_eval = _get_evaluated_z(obj)
+                        z_eval = _get_evaluated_z(obj, depsgraph)
                         if z_eval is None:
                             z_eval = float(obj.rotation_euler[2])
                         _unwrap_reset(node_id, float(z_eval))
@@ -1139,13 +1168,16 @@ def robstride_sync_handler(scene,depsgraph=None):
         if node.mode == 'RUN':
             # Use recorded animation (keyframes) if present, else current property
             z_from_anim = _get_anim_z_value(obj, scene.frame_current)
-            # Prefer evaluated rotation (post-constraints). If unavailable, use animated/raw.
-            z_eval = _get_evaluated_z(obj)
-            if z_eval is None:
-                try:
-                    z_eval = float(z_from_anim) if z_from_anim is not None else float(obj.rotation_euler[2])
-                except Exception:
-                    z_eval = float(obj.rotation_euler[2])
+            if _is_animation_playing() and z_from_anim is not None:
+                z_eval = float(z_from_anim)
+            else:
+                # Prefer evaluated rotation (post-constraints). If unavailable, use animated/raw.
+                z_eval = _get_evaluated_z(obj, depsgraph)
+                if z_eval is None:
+                    try:
+                        z_eval = float(z_from_anim) if z_from_anim is not None else float(obj.rotation_euler[2])
+                    except Exception:
+                        z_eval = float(obj.rotation_euler[2])
             # Unwrap first for continuity across Euler wrap, then clamp to limits
             z_cont = _unwrap_update(int(node_id), float(z_eval))
             z_sat = _clamp_z_to_limits(obj, float(z_cont))
