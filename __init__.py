@@ -160,9 +160,8 @@ def _simulated_value_for_node(node) -> float:
 
 def _update_simulated_position(node):
     try:
-        val = _simulated_value_for_node(node)
-        node_units = node.scale * float(val) + node.offset
-        _simulated_pos[int(node.node_id)] = node_units
+        node_units = _simulated_value_for_node(node)
+        _simulated_pos[int(node.node_id)] = float(node_units)
     except Exception:
         pass
 
