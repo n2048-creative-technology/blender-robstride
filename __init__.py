@@ -22,6 +22,7 @@ from bpy.props import (
 import json
 import os
 import math
+import time
 
 # Local module providing CAN communication (stubbed if python-can not available)
 from . import robstride_can
@@ -78,9 +79,108 @@ def _on_node_object_update(self, context):
                 pass
 
 
+def _remove_simulated_nodes(scene):
+    nodes = getattr(scene, 'robstride_nodes', None)
+    if nodes is None:
+        return
+    remove_indices = [i for i, n in enumerate(nodes) if getattr(n, 'is_simulated', False)]
+    for i in reversed(remove_indices):
+        nodes.remove(i)
+
+
+def _sync_simulated_nodes(scene, enable: bool):
+    if not enable:
+        _remove_simulated_nodes(scene)
+        return
+    nodes = getattr(scene, 'robstride_nodes', None)
+    if nodes is None:
+        return
+    existing = {int(n.node_id): n for n in nodes}
+    sim_defs = [
+        {"id": 126, "name": "sim node 126"},
+        {"id": 127, "name": "sim node 127"},
+    ]
+    for sim in sim_defs:
+        sim_id = int(sim["id"])
+        if sim_id in existing:
+            if getattr(existing[sim_id], 'is_simulated', False):
+                continue
+            # Do not overwrite real nodes with same ID
+            continue
+        n = nodes.add()
+        n.node_id = sim_id
+        n.name = str(sim["name"])
+        n.is_simulated = True
+        try:
+            _enabled_state[int(sim_id)] = False
+        except Exception:
+            pass
+
+
+def _has_simulated_nodes(scene) -> bool:
+    try:
+        return any(getattr(n, 'is_simulated', False) for n in scene.robstride_nodes)
+    except Exception:
+        return False
+
+
+def _is_simulated_node(node) -> bool:
+    try:
+        return bool(getattr(node, 'is_simulated', False))
+    except Exception:
+        return False
+
+
+def _schedule_simulated_sync(scene, enable: bool):
+    global _sim_sync_pending
+    if _sim_sync_pending:
+        return
+    _sim_sync_pending = True
+    def _run():
+        global _sim_sync_pending
+        _sim_sync_pending = False
+        try:
+            _sync_simulated_nodes(scene, enable)
+        except Exception:
+            pass
+        return None
+    try:
+        bpy.app.timers.register(_run, first_interval=0.0)
+    except Exception:
+        _run()
+
+
+def _simulated_value_for_node(node) -> float:
+    kind, _axis = _transform_spec(node.transform)
+    phase = time.time()
+    if kind == "ROT":
+        return math.sin(phase) * math.pi
+    return math.sin(phase)
+
+
+def _update_simulated_position(node):
+    try:
+        val = _simulated_value_for_node(node)
+        node_units = node.scale * float(val) + node.offset
+        _simulated_pos[int(node.node_id)] = node_units
+    except Exception:
+        pass
+
+
+def _on_scene_simulated_update(self, context):
+    scene = getattr(context, 'scene', None) or bpy.context.scene
+    if robstride_can.manager.is_connected():
+        try:
+            scene.robstride_show_simulated = False
+        except Exception:
+            pass
+        _schedule_simulated_sync(scene, False)
+        return
+    _schedule_simulated_sync(scene, bool(getattr(scene, 'robstride_show_simulated', False)))
+
+
 class RobStrideAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
-
     interface: StringProperty(
         name="CAN Interface",
         description="python-can interface (e.g., robstride, socketcan, kvaser)",
@@ -143,14 +243,27 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
     name: StringProperty(name="Name", default="Node")
     node_id: IntProperty(name="ID", default=0, min=0)
     object_ref: PointerProperty(name="Object", type=bpy.types.Object, update=_on_node_object_update)
+    is_simulated: BoolProperty(name="Simulated", default=False)
     mode: EnumProperty(
         name="Mode",
         items=[
-            ("RUN", "Run", "Send object Z rotation to node"),
-            ("LEARN", "Learn", "Read encoder and keyframe object Z"),
+            ("RUN", "Run", "Send object transform to node"),
+            ("LEARN", "Learn", "Read encoder and keyframe object transform"),
         ],
         default="RUN",
         update=_on_node_mode_update,
+    )
+    transform: EnumProperty(
+        name="Transform",
+        items=[
+            ("ROT_X", "Rotation X", "Use X rotation"),
+            ("ROT_Y", "Rotation Y", "Use Y rotation"),
+            ("ROT_Z", "Rotation Z", "Use Z rotation"),
+            ("LOC_X", "Translation X", "Use X translation"),
+            ("LOC_Y", "Translation Y", "Use Y translation"),
+            ("LOC_Z", "Translation Z", "Use Z translation"),
+        ],
+        default="ROT_Z",
     )
     scale: FloatProperty(
         name="Scale",
@@ -228,6 +341,8 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
             if m_id in existing:
                 # Keep user-customized name; do not overwrite
                 n = existing[m_id]
+                if getattr(n, 'is_simulated', False):
+                    n.is_simulated = False
             else:
                 n = nodes.add()
                 n.name = m_name
@@ -237,6 +352,11 @@ class ROBSTRIDE_OT_scan(bpy.types.Operator):
                     _enabled_state[int(m_id)] = False
                 except Exception:
                     pass
+
+        if not connected:
+            _sync_simulated_nodes(scene, bool(getattr(scene, 'robstride_show_simulated', False)))
+        else:
+            _remove_simulated_nodes(scene)
 
         # Disconnect if we connected temporarily just for the scan
         if temp_connected:
@@ -291,6 +411,10 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
         if not robstride_can.manager.connect():
             self.report({'ERROR'}, "Failed to connect")
             return {'CANCELLED'}
+        try:
+            scene.robstride_show_simulated = False
+        except Exception:
+            pass
 
         # After connecting, scan and ensure nodes are added/prepared
         found = robstride_can.manager.scan()
@@ -303,7 +427,9 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
             m_name = str(m.get("name", f"node {m_id}"))
             if m_id in existing:
                 # Keep user-defined name
-                pass
+                n = existing[m_id]
+                if getattr(n, 'is_simulated', False):
+                    n.is_simulated = False
             else:
                 n = nodes.add()
                 n.name = m_name
@@ -313,6 +439,7 @@ class ROBSTRIDE_OT_connect_toggle(bpy.types.Operator):
                     _enabled_state[int(m_id)] = False
                 except Exception:
                     pass
+        _remove_simulated_nodes(scene)
 
         # Prepare canopen nodes where applicable
         for n in nodes:
@@ -337,6 +464,14 @@ class ROBSTRIDE_OT_node_enable(bpy.types.Operator):
             node = next((n for n in scene.robstride_nodes if int(n.node_id) == int(self.node_id)), None)
         except Exception:
             node = None
+        if node and _is_simulated_node(node):
+            if node.mode == 'LEARN':
+                _enabled_state[int(self.node_id)] = False
+                self.report({'INFO'}, "Simulated node in Learn mode: disabled")
+                return {'FINISHED'}
+            _enabled_state[int(self.node_id)] = True
+            self.report({'INFO'}, f"Enabled simulated node {int(self.node_id)}")
+            return {'FINISHED'}
         if node and node.mode == 'LEARN':
             prefs = context.preferences.addons[__name__].preferences
             try:
@@ -397,6 +532,15 @@ class ROBSTRIDE_OT_node_disable(bpy.types.Operator):
     node_id: IntProperty()
 
     def execute(self, context):
+        try:
+            scene = context.scene
+            node = next((n for n in scene.robstride_nodes if int(n.node_id) == int(self.node_id)), None)
+        except Exception:
+            node = None
+        if node and _is_simulated_node(node):
+            _enabled_state[int(self.node_id)] = False
+            self.report({'INFO'}, f"Disabled simulated node {int(self.node_id)}")
+            return {'FINISHED'}
         prefs = context.preferences.addons[__name__].preferences
         try:
             robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
@@ -430,6 +574,20 @@ class ROBSTRIDE_OT_enable_all(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
+        sim_only = True
+        for n in scene.robstride_nodes:
+            if not _is_simulated_node(n):
+                sim_only = False
+                break
+        if sim_only:
+            count = 0
+            for n in scene.robstride_nodes:
+                if n.mode != 'RUN':
+                    continue
+                _enabled_state[int(n.node_id)] = True
+                count += 1
+            self.report({'INFO'}, f"Enabled {count} simulated RUN nodes")
+            return {'FINISHED'}
         prefs = context.preferences.addons[__name__].preferences
         # Ensure host low byte matches scripts and connect if needed
         try:
@@ -473,6 +631,20 @@ class ROBSTRIDE_OT_disable_all(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
+        sim_only = True
+        for n in scene.robstride_nodes:
+            if not _is_simulated_node(n):
+                sim_only = False
+                break
+        if sim_only:
+            count = 0
+            for n in scene.robstride_nodes:
+                if n.mode != 'RUN':
+                    continue
+                _enabled_state[int(n.node_id)] = False
+                count += 1
+            self.report({'INFO'}, f"Disabled {count} simulated RUN nodes")
+            return {'FINISHED'}
         prefs = context.preferences.addons[__name__].preferences
         try:
             robstride_can.manager._host_addr = int(prefs.host_id_low) & 0xFF  # type: ignore[attr-defined]
@@ -536,11 +708,14 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
         }
 
         for node in scene.robstride_nodes:
+            if getattr(node, 'is_simulated', False):
+                continue
             data["nodes"].append({
                 "id": int(node.node_id),
                 "name": node.name,
                 "object": node.object_ref.name if node.object_ref else "",
                 "mode": node.mode,
+                "transform": node.transform,
                 "scale": float(node.scale),
                 "offset": float(node.offset),
             })
@@ -593,10 +768,16 @@ class ROBSTRIDE_OT_load_config(bpy.types.Operator):
             n = nodes.add()
             n.node_id = int(m.get("id", 0))
             n.name = str(m.get("name", f"node {n.node_id}"))
+            n.is_simulated = False
             obj_name = str(m.get("object", ""))
             n.object_ref = bpy.data.objects.get(obj_name) if obj_name else None
             mode = str(m.get("mode", "RUN"))
             n.mode = mode if mode in {"RUN", "LEARN"} else "RUN"
+            transform = str(m.get("transform", "ROT_Z"))
+            if transform in {"ROT_X", "ROT_Y", "ROT_Z", "LOC_X", "LOC_Y", "LOC_Z"}:
+                n.transform = transform
+            else:
+                n.transform = "ROT_Z"
             n.scale = float(m.get("scale", 1.0))
             n.offset = float(m.get("offset", 0.0))
             # Default loaded nodes to disabled until user enables explicitly
@@ -650,6 +831,10 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
         connected = robstride_can.manager.is_connected()
         net_icon = 'LINKED' if connected else 'UNLINKED'
         net_row.label(text=f"Network: {'Connected' if connected else 'Disconnected'}", icon=net_icon)
+        if not connected:
+            can_box.prop(scene, "robstride_show_simulated")
+            if bool(getattr(scene, "robstride_show_simulated", False)) and not _has_simulated_nodes(scene):
+                _schedule_simulated_sync(scene, True)
 
         row = can_box.row(align=True)
         row.operator(ROBSTRIDE_OT_scan.bl_idname, icon='VIEWZOOM', text="Scan")
@@ -690,7 +875,10 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             online = robstride_can.manager.node_status(node.node_id)
             online_icon = 'CHECKMARK' if online else 'ERROR'
             header.label(text=f"ID {node.node_id}", icon='DRIVER')
-            header.label(text=("Online" if online else "Offline"), icon=online_icon)
+            if getattr(node, 'is_simulated', False):
+                header.label(text="Simulated", icon='GHOST_ENABLED')
+            else:
+                header.label(text=("Online" if online else "Offline"), icon=online_icon)
             # Show enabled/disabled state indicator (derived from tracked state and mode)
             try:
                 en_state = _enabled_state.get(int(node.node_id))
@@ -705,6 +893,7 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
 
             col = box.column(align=True)
             col.prop(node, "object_ref")
+            col.prop(node, "transform")
             # Draw RUN/LEARN as separate toggles so we can disable LEARN per-object
             row_mode = col.row(align=True)
             row_mode.prop_enum(node, "mode", "RUN")
@@ -747,21 +936,25 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             # Show constraint limits and whether clamping is currently active
             try:
                 if node.object_ref:
+                    kind, axis = _transform_spec(node.transform)
+                    if kind != "ROT":
+                        continue
+                    axis_label = ("X", "Y", "Z")[axis]
                     try:
-                        limits = _get_z_limits(node.object_ref)
+                        limits = _get_rot_limits(node.object_ref, axis)
                     except Exception:
                         limits = None
                     if limits:
                         zmin, zmax = limits
                         lim_row = box.row(align=True)
-                        lim_row.label(text=f"Limits Z: {_fmt_deg(zmin)} .. {_fmt_deg(zmax)}", icon='CON_ROTLIMIT')
+                        lim_row.label(text=f"Limits {axis_label}: {_fmt_deg(zmin)} .. {_fmt_deg(zmax)}", icon='CON_ROTLIMIT')
 
                         # RUN direction: check current intended object Z vs limits
                         if node.mode == 'RUN':
                             try:
-                                z_eval = _get_evaluated_z(node.object_ref)
+                                z_eval = _get_evaluated_transform(node.object_ref, kind, axis)
                                 if z_eval is None:
-                                    z_eval = float(node.object_ref.rotation_euler[2])
+                                    z_eval = float(node.object_ref.rotation_euler[axis])
                                 if not (zmin <= float(z_eval) <= zmax):
                                     clamp_row = box.row(align=True)
                                     side = 'below min' if float(z_eval) < zmin else 'above max'
@@ -790,6 +983,8 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
 _last_out = {}
 _last_mode = {}
 _enabled_state = {}
+_simulated_pos = {}
+_sim_sync_pending = False
 
 # Continuous Z unwrapping per node_id
 _unwrap_prev = {}
@@ -844,7 +1039,7 @@ def _fmt_deg(val: float) -> str:
         return "?"
 
 
-def _replace_z_keyframe(obj, frame):
+def _replace_transform_keyframe(obj, data_path, index, frame):
     try:
         ad = obj.animation_data_create()
         if ad.action is None:
@@ -853,26 +1048,26 @@ def _replace_z_keyframe(obj, frame):
         ad = getattr(obj, 'animation_data', None)
     if ad and ad.action:
         for fc in _iter_action_fcurves(ad.action):
-            if fc.data_path == 'rotation_euler' and fc.array_index == 2:
+            if fc.data_path == data_path and fc.array_index == index:
                 # Remove any keyframe at the current frame so the new one takes priority
                 remove = [kp for kp in fc.keyframe_points if abs(kp.co.x - frame) < 1e-5]
                 for kp in remove:
                     fc.keyframe_points.remove(kp)
                 fc.update()
                 break
-    # Insert the new keyframe for Z rotation at this frame
+    # Insert the new keyframe for the selected transform at this frame
     try:
-        obj.keyframe_insert(data_path="rotation_euler", index=2, frame=frame)
+        obj.keyframe_insert(data_path=data_path, index=index, frame=frame)
     except Exception:
-        obj.keyframe_insert(data_path="rotation_euler", index=2)
+        obj.keyframe_insert(data_path=data_path, index=index)
 
 
-def _get_anim_z_value(obj, frame):
+def _get_anim_value(obj, data_path, index, frame):
     ad = getattr(obj, 'animation_data', None)
     if not (ad and ad.action):
         return None
     for fc in _iter_action_fcurves(ad.action):
-        if fc.data_path == 'rotation_euler' and fc.array_index == 2:
+        if fc.data_path == data_path and fc.array_index == index:
             try:
                 return float(fc.evaluate(frame))
             except Exception:
@@ -940,79 +1135,102 @@ def _auto_keying_enabled(scene=None) -> bool:
         return False
 
 
+def _transform_spec(transform: str):
+    if transform == "ROT_X":
+        return "ROT", 0
+    if transform == "ROT_Y":
+        return "ROT", 1
+    if transform == "ROT_Z":
+        return "ROT", 2
+    if transform == "LOC_X":
+        return "LOC", 0
+    if transform == "LOC_Y":
+        return "LOC", 1
+    if transform == "LOC_Z":
+        return "LOC", 2
+    return "ROT", 2
+
+
+def _transform_data_path(kind: str) -> str:
+    return "rotation_euler" if kind == "ROT" else "location"
+
+
+def _get_evaluated_transform(obj, kind, axis, depsgraph=None):
+    """Return object's evaluated transform value for the given kind/axis."""
+    try:
+        if depsgraph is None:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+        obj_eval = obj.evaluated_get(depsgraph)
+        if kind == "ROT":
+            rot_mode = getattr(obj, 'rotation_mode', 'XYZ')
+            try:
+                return float(obj_eval.matrix_local.to_euler(rot_mode)[axis])
+            except Exception:
+                return float(obj_eval.rotation_euler[axis])
+        # LOC
+        try:
+            return float(obj_eval.matrix_local.to_translation()[axis])
+        except Exception:
+            return float(obj_eval.location[axis])
+    except Exception:
+        return None
+
+
 # Lightweight timer to update LEARN mode while not playing
 _timer_enabled = False
 _learn_enforced = set()
 
 
-def _get_z_limits(obj):
-    """Return (min_z, max_z) in radians from active Limit Rotation constraints.
-    Intersects multiple constraints; returns None if no Z limits present.
-    """
+def _get_rot_limits(obj, axis):
+    """Return (min, max) in radians from active Limit Rotation constraints for axis."""
     try:
         cons = getattr(obj, 'constraints', [])
     except Exception:
         cons = []
-    min_z = None
-    max_z = None
+    min_v = None
+    max_v = None
     for c in cons:
         try:
             if getattr(c, 'type', '') != 'LIMIT_ROTATION':
                 continue
-            if not bool(getattr(c, 'use_limit_z', False)):
+            use_key = ("use_limit_x", "use_limit_y", "use_limit_z")[axis]
+            if not bool(getattr(c, use_key, False)):
                 continue
             if bool(getattr(c, 'mute', False)):
                 continue
             if float(getattr(c, 'influence', 1.0)) <= 0.0:
                 continue
-            cmin = float(getattr(c, 'min_z', float('-inf')))
-            cmax = float(getattr(c, 'max_z', float('inf')))
-            min_z = cmin if min_z is None else max(min_z, cmin)
-            max_z = cmax if max_z is None else min(max_z, cmax)
+            min_key = ("min_x", "min_y", "min_z")[axis]
+            max_key = ("max_x", "max_y", "max_z")[axis]
+            cmin = float(getattr(c, min_key, float('-inf')))
+            cmax = float(getattr(c, max_key, float('inf')))
+            min_v = cmin if min_v is None else max(min_v, cmin)
+            max_v = cmax if max_v is None else min(max_v, cmax)
         except Exception:
             # Ignore malformed constraints; continue intersecting others
             pass
-    if min_z is None and max_z is None:
+    if min_v is None and max_v is None:
         return None
     # If limits are inverted due to user input, normalize by swapping
-    if (min_z is not None) and (max_z is not None) and (min_z > max_z):
-        min_z, max_z = max_z, min_z
+    if (min_v is not None) and (max_v is not None) and (min_v > max_v):
+        min_v, max_v = max_v, min_v
     return (
-        (min_z if min_z is not None else float('-inf')),
-        (max_z if max_z is not None else float('inf')),
+        (min_v if min_v is not None else float('-inf')),
+        (max_v if max_v is not None else float('inf')),
     )
 
 
-def _clamp_z_to_limits(obj, z_rad):
-    """Clamp z_rad (radians) to any Limit Rotation Z constraints on the object."""
-    limits = _get_z_limits(obj)
+def _clamp_rot_to_limits(obj, axis, rad_val):
+    """Clamp rad_val (radians) to any Limit Rotation constraints on axis."""
+    limits = _get_rot_limits(obj, axis)
     if not limits:
-        return z_rad
-    zmin, zmax = limits
-    if z_rad < zmin:
-        return zmin
-    if z_rad > zmax:
-        return zmax
-    return z_rad
-
-
-def _get_evaluated_z(obj, depsgraph=None):
-    """Return object's Z rotation (radians) after constraints, from depsgraph.
-    Prefers local space via matrix_local, falls back to evaluated rotation_euler.
-    Returns None if not available.
-    """
-    try:
-        if depsgraph is None:
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-        obj_eval = obj.evaluated_get(depsgraph)
-        rot_mode = getattr(obj, 'rotation_mode', 'XYZ')
-        try:
-            # Local rotation including constraints/parents
-            return float(obj_eval.matrix_local.to_euler(rot_mode)[2])
-        except Exception:
-            return float(obj_eval.rotation_euler[2])
-    except Exception:
-        return None
+        return rad_val
+    vmin, vmax = limits
+    if rad_val < vmin:
+        return vmin
+    if rad_val > vmax:
+        return vmax
+    return rad_val
 
 
 def _robstride_learn_timer():
@@ -1026,10 +1244,17 @@ def _robstride_learn_timer():
         scene = bpy.context.scene
     except Exception:
         return 0.25
+    if not robstride_can.manager.is_connected():
+        if bool(getattr(scene, 'robstride_show_simulated', False)):
+            if not _has_simulated_nodes(scene):
+                _sync_simulated_nodes(scene, True)
+        else:
+            _remove_simulated_nodes(scene)
 
     # Skip if not connected
     if not robstride_can.manager.is_connected():
-        return 0.25
+        if not _has_simulated_nodes(scene):
+            return 0.25
 
     # During playback, drive RUN updates and still allow LEARN keyframing
     if playing:
@@ -1041,22 +1266,31 @@ def _robstride_learn_timer():
                 if enabled is not True:
                     continue
                 obj = node.object_ref
-                z_eval = _get_evaluated_z(obj)
-                if z_eval is None:
+                kind, axis = _transform_spec(node.transform)
+                val_eval = _get_evaluated_transform(obj, kind, axis)
+                if val_eval is None:
                     try:
-                        z_eval = float(obj.rotation_euler[2])
+                        if kind == "ROT":
+                            val_eval = float(obj.rotation_euler[axis])
+                        else:
+                            val_eval = float(obj.location[axis])
                     except Exception:
                         continue
-                z_cont = _unwrap_update(int(node.node_id), float(z_eval))
-                z_sat = _clamp_z_to_limits(obj, float(z_cont))
-                node_units = node.scale * z_sat + node.offset
+                if kind == "ROT":
+                    val_eval = _unwrap_update(int(node.node_id), float(val_eval))
+                    val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
+                node_units = node.scale * float(val_eval) + node.offset
                 prev = _last_out.get(int(node.node_id))
                 if prev is None or abs(prev - node_units) > 1e-6:
-                    try:
-                        robstride_can.manager.send_position(int(node.node_id), node_units)
+                    if _is_simulated_node(node):
+                        _simulated_pos[int(node.node_id)] = node_units
                         _last_out[int(node.node_id)] = node_units
-                    except Exception:
-                        pass
+                    else:
+                        try:
+                            robstride_can.manager.send_position(int(node.node_id), node_units)
+                            _last_out[int(node.node_id)] = node_units
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1082,17 +1316,19 @@ def _robstride_learn_timer():
             for node in scene.robstride_nodes:
                 if node.mode == 'LEARN':
                     if node.node_id not in _learn_enforced:
-                        try:
-                            robstride_can.manager.enable_node(int(node.node_id), False)
-                        except Exception:
-                            pass
+                        if not _is_simulated_node(node):
+                            try:
+                                robstride_can.manager.enable_node(int(node.node_id), False)
+                            except Exception:
+                                pass
                         _learn_enforced.add(node.node_id)
                 else:
                     if node.node_id in _learn_enforced:
                         _learn_enforced.discard(node.node_id)
                 if node.mode != 'LEARN' or not node.object_ref:
                     continue
-                robstride_can.manager.request_read(node.node_id)
+                if not _is_simulated_node(node):
+                    robstride_can.manager.request_read(node.node_id)
         except Exception:
             pass
 
@@ -1101,15 +1337,25 @@ def _robstride_learn_timer():
                 if node.mode != 'LEARN' or not node.object_ref:
                     continue
                 obj = node.object_ref
-                pos = robstride_can.manager.get_cached_position(node.node_id)
+                if _is_simulated_node(node):
+                    _update_simulated_position(node)
+                    pos = _simulated_pos.get(int(node.node_id))
+                else:
+                    pos = robstride_can.manager.get_cached_position(node.node_id)
                 if pos is None:
                     continue
-                z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
-                z_rad = _clamp_z_to_limits(obj, float(z_rad))
+                kind, axis = _transform_spec(node.transform)
+                val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+                if kind == "ROT":
+                    val_raw = _clamp_rot_to_limits(obj, axis, float(val_raw))
                 try:
-                    obj.rotation_euler[2] = z_rad
+                    if kind == "ROT":
+                        obj.rotation_euler[axis] = float(val_raw)
+                    else:
+                        obj.location[axis] = float(val_raw)
                     if _auto_keying_enabled(scene):
-                        _replace_z_keyframe(obj, scene.frame_current)
+                        data_path = _transform_data_path(kind)
+                        _replace_transform_keyframe(obj, data_path, axis, scene.frame_current)
                 except Exception:
                     pass
         except Exception:
@@ -1141,17 +1387,19 @@ def _robstride_learn_timer():
         for node in scene.robstride_nodes:
             if node.mode == 'LEARN':
                 if node.node_id not in _learn_enforced:
-                    try:
-                        robstride_can.manager.enable_node(int(node.node_id), False)
-                    except Exception:
-                        pass
+                    if not _is_simulated_node(node):
+                        try:
+                            robstride_can.manager.enable_node(int(node.node_id), False)
+                        except Exception:
+                            pass
                     _learn_enforced.add(node.node_id)
             else:
                 if node.node_id in _learn_enforced:
                     _learn_enforced.discard(node.node_id)
             if node.mode != 'LEARN' or not node.object_ref:
                 continue
-            robstride_can.manager.request_read(node.node_id)
+            if not _is_simulated_node(node):
+                robstride_can.manager.request_read(node.node_id)
     except Exception:
         pass
 
@@ -1160,15 +1408,25 @@ def _robstride_learn_timer():
             if node.mode != 'LEARN' or not node.object_ref:
                 continue
             obj = node.object_ref
-            pos = robstride_can.manager.get_cached_position(node.node_id)
+            if _is_simulated_node(node):
+                _update_simulated_position(node)
+                pos = _simulated_pos.get(int(node.node_id))
+            else:
+                pos = robstride_can.manager.get_cached_position(node.node_id)
             if pos is None:
                 continue
-            z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
-            z_rad = _clamp_z_to_limits(obj, float(z_rad))
+            kind, axis = _transform_spec(node.transform)
+            val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            if kind == "ROT":
+                val_raw = _clamp_rot_to_limits(obj, axis, float(val_raw))
             try:
-                obj.rotation_euler[2] = z_rad
+                if kind == "ROT":
+                    obj.rotation_euler[axis] = float(val_raw)
+                else:
+                    obj.location[axis] = float(val_raw)
                 if _auto_keying_enabled(scene):
-                    _replace_z_keyframe(obj, scene.frame_current)
+                    data_path = _transform_data_path(kind)
+                    _replace_transform_keyframe(obj, data_path, axis, scene.frame_current)
             except Exception:
                 pass
     except Exception:
@@ -1183,25 +1441,34 @@ def _robstride_learn_timer():
             if enabled is not True:
                 continue
             obj = node.object_ref
-            # Prefer evaluated rotation (post-constraints); fallback to raw property
-            z_eval = _get_evaluated_z(obj)
-            if z_eval is None:
+            kind, axis = _transform_spec(node.transform)
+            # Prefer evaluated value (post-constraints); fallback to raw property
+            val_eval = _get_evaluated_transform(obj, kind, axis)
+            if val_eval is None:
                 try:
-                    z_eval = float(obj.rotation_euler[2])
+                    if kind == "ROT":
+                        val_eval = float(obj.rotation_euler[axis])
+                    else:
+                        val_eval = float(obj.location[axis])
                 except Exception:
                     continue
 
-            # Unwrap first for continuity across Euler wrap, then clamp to limits
-            z_cont = _unwrap_update(int(node.node_id), float(z_eval))
-            z_sat = _clamp_z_to_limits(obj, float(z_cont))
-            node_units = node.scale * z_sat + node.offset
+            if kind == "ROT":
+                # Unwrap first for continuity across Euler wrap, then clamp to limits
+                val_eval = _unwrap_update(int(node.node_id), float(val_eval))
+                val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
+            node_units = node.scale * float(val_eval) + node.offset
             prev = _last_out.get(int(node.node_id))
             if prev is None or abs(prev - node_units) > 1e-6:
-                try:
-                    robstride_can.manager.send_position(int(node.node_id), node_units)
+                if _is_simulated_node(node):
+                    _simulated_pos[int(node.node_id)] = node_units
                     _last_out[int(node.node_id)] = node_units
-                except Exception:
-                    pass
+                else:
+                    try:
+                        robstride_can.manager.send_position(int(node.node_id), node_units)
+                        _last_out[int(node.node_id)] = node_units
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -1230,7 +1497,20 @@ def robstride_sync_handler(scene,depsgraph=None):
     # If not connected, try to connect so RUN mode can drive motors
     try:
         if not robstride_can.manager.is_connected():
-            robstride_can.manager.connect()
+            try:
+                if bool(getattr(scene, 'robstride_show_simulated', False)):
+                    pass
+                else:
+                    robstride_can.manager.connect()
+            except Exception:
+                robstride_can.manager.connect()
+        else:
+            try:
+                if bool(getattr(scene, 'robstride_show_simulated', False)):
+                    scene.robstride_show_simulated = False
+            except Exception:
+                pass
+            _remove_simulated_nodes(scene)
     except Exception:
         pass
 
@@ -1240,9 +1520,11 @@ def robstride_sync_handler(scene,depsgraph=None):
 
         obj = node.object_ref
         node_id = node.node_id
+        kind, axis = _transform_spec(node.transform)
+        data_path = _transform_data_path(kind)
 
-        # Skip if not connected
-        if not robstride_can.manager.is_connected():
+        # Skip if not connected and not simulated
+        if not robstride_can.manager.is_connected() and not _is_simulated_node(node):
             continue
 
         # PID parameters removed; no PID updates sent
@@ -1252,74 +1534,91 @@ def robstride_sync_handler(scene,depsgraph=None):
         if prev_mode != node.mode:
             try:
                 if node.mode == 'LEARN':
-                    robstride_can.manager.enable_node(node_id, False)
+                    if not _is_simulated_node(node):
+                        robstride_can.manager.enable_node(node_id, False)
                     _enabled_state[node_id] = False
-                    # Ensure object uses Euler so Z rotation is keyframable and visible
-                    try:
-                        obj.rotation_mode = 'XYZ'
-                    except Exception:
-                        pass
-                    # Reset unwrapping when entering LEARN
-                    try:
-                        _unwrap_reset(node_id)
-                    except Exception:
-                        pass
+                    if kind == "ROT":
+                        # Ensure object uses Euler so rotation is keyframable and visible
+                        try:
+                            obj.rotation_mode = 'XYZ'
+                        except Exception:
+                            pass
+                        # Reset unwrapping when entering LEARN
+                        try:
+                            _unwrap_reset(node_id)
+                        except Exception:
+                            pass
                 elif node.mode == 'RUN':
                     # Do not auto-enable on entering RUN; default remains disabled
-                    # Initialize unwrapping at current evaluated angle to avoid jumps
-                    try:
-                        z_eval = _get_evaluated_z(obj, depsgraph)
-                        if z_eval is None:
-                            z_eval = float(obj.rotation_euler[2])
-                        _unwrap_reset(node_id, float(z_eval))
-                    except Exception:
-                        pass
+                    if kind == "ROT":
+                        # Initialize unwrapping at current evaluated angle to avoid jumps
+                        try:
+                            val_eval = _get_evaluated_transform(obj, kind, axis, depsgraph)
+                            if val_eval is None:
+                                val_eval = float(obj.rotation_euler[axis])
+                            _unwrap_reset(node_id, float(val_eval))
+                        except Exception:
+                            pass
             except Exception:
                 pass
             _last_mode[node_id] = node.mode
 
         if node.mode == 'RUN':
             # Use recorded animation (keyframes) if present, else current property
-            z_from_anim = _get_anim_z_value(obj, scene.frame_current)
-            if _is_animation_playing() and z_from_anim is not None:
-                z_eval = float(z_from_anim)
+            val_from_anim = _get_anim_value(obj, data_path, axis, scene.frame_current)
+            if _is_animation_playing() and val_from_anim is not None:
+                val_eval = float(val_from_anim)
             else:
-                # Prefer evaluated rotation (post-constraints). If unavailable, use animated/raw.
-                z_eval = _get_evaluated_z(obj, depsgraph)
-                if z_eval is None:
+                # Prefer evaluated value (post-constraints). If unavailable, use animated/raw.
+                val_eval = _get_evaluated_transform(obj, kind, axis, depsgraph)
+                if val_eval is None:
                     try:
-                        z_eval = float(z_from_anim) if z_from_anim is not None else float(obj.rotation_euler[2])
+                        if val_from_anim is not None:
+                            val_eval = float(val_from_anim)
+                        else:
+                            val_eval = float(obj.rotation_euler[axis] if kind == "ROT" else obj.location[axis])
                     except Exception:
-                        z_eval = float(obj.rotation_euler[2])
-            # Unwrap first for continuity across Euler wrap, then clamp to limits
-            z_cont = _unwrap_update(int(node_id), float(z_eval))
-            z_sat = _clamp_z_to_limits(obj, float(z_cont))
-            node_units = node.scale * z_sat + node.offset
+                        val_eval = float(obj.rotation_euler[axis] if kind == "ROT" else obj.location[axis])
+            if kind == "ROT":
+                # Unwrap first for continuity across Euler wrap, then clamp to limits
+                val_eval = _unwrap_update(int(node_id), float(val_eval))
+                val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
+            node_units = node.scale * float(val_eval) + node.offset
 
             # Send synchronously per frame to mirror move.py timing
             enabled = _enabled_state.get(int(node_id))
             if enabled is True:
-                try:
-                    robstride_can.manager.send_position(node_id, node_units)
-                except Exception:
-                    pass
+                if _is_simulated_node(node):
+                    _simulated_pos[int(node_id)] = node_units
+                else:
+                    try:
+                        robstride_can.manager.send_position(node_id, node_units)
+                    except Exception:
+                        pass
 
         elif node.mode == 'LEARN':
             # Non-blocking: request a read and use last cached value if available
-            robstride_can.manager.request_read(node_id)
-            pos = robstride_can.manager.get_cached_position(node_id)
+            if _is_simulated_node(node):
+                _update_simulated_position(node)
+                pos = _simulated_pos.get(int(node_id))
+            else:
+                robstride_can.manager.request_read(node_id)
+                pos = robstride_can.manager.get_cached_position(node_id)
             if pos is None:
                 # Skip this frame if not ready to avoid blocking and FPS drops
                 continue
 
-            # node units -> radians
-            z_rad = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
-            z_rad = _clamp_z_to_limits(obj, float(z_rad))
-            obj.rotation_euler[2] = z_rad
+            # node units -> value
+            val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
+            if kind == "ROT":
+                val_raw = _clamp_rot_to_limits(obj, axis, float(val_raw))
+                obj.rotation_euler[axis] = float(val_raw)
+            else:
+                obj.location[axis] = float(val_raw)
 
             # Keyframe if auto keying is enabled
             if _auto_keying_enabled(scene):
-                _replace_z_keyframe(obj, scene.frame_current)
+                _replace_transform_keyframe(obj, data_path, axis, scene.frame_current)
 
 
 classes = (
@@ -1343,6 +1642,12 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.robstride_nodes = CollectionProperty(type=RobStridenodeNode)
+    bpy.types.Scene.robstride_show_simulated = BoolProperty(
+        name="Show Simulated Nodes",
+        description="Show 2 simulated nodes when CAN is disconnected",
+        default=False,
+        update=_on_scene_simulated_update,
+    )
 
     # Install handler
     if robstride_sync_handler not in bpy.app.handlers.frame_change_post:
@@ -1370,6 +1675,7 @@ def unregister():
     global _timer_enabled
     _timer_enabled = False
 
+    del bpy.types.Scene.robstride_show_simulated
     del bpy.types.Scene.robstride_nodes
 
     for cls in reversed(classes):
