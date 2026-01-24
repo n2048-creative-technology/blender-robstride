@@ -1,6 +1,5 @@
 import os
 import sys
-import subprocess
 from typing import Tuple
 
 
@@ -13,6 +12,7 @@ def _vendor_dir() -> str:
 
 
 def _wheels_dir() -> str:
+    # Wheels are not used in Extensions per guidelines
     return os.path.join(_addon_root(), "wheels")
 
 
@@ -23,6 +23,8 @@ def add_vendor_to_path() -> None:
 
 
 def have_modules() -> Tuple[bool, bool, bool]:
+    # Ensure vendored path is available before import checks
+    add_vendor_to_path()
     try:
         import can  # noqa: F401
         has_can = True
@@ -42,36 +44,9 @@ def have_modules() -> Tuple[bool, bool, bool]:
 
 
 def install_from_wheels() -> bool:
-    wheels = _wheels_dir()
-    if not os.path.isdir(wheels):
-        return False
-    vendor = _vendor_dir()
-    os.makedirs(vendor, exist_ok=True)
-    # Ensure pip is available
-    try:
-        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])  # noqa: S603
-    except Exception:
-        pass
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--no-index",
-        "--find-links",
-        wheels,
-        "-t",
-        vendor,
-        "python-can",
-        "canopen",
-        "robstride",
-    ]
-    try:
-        subprocess.check_call(cmd)  # noqa: S603
-        return True
-    except Exception:
-        return False
+    # Runtime installation is not performed in Extensions.
+    # Dependencies are vendored under the package's vendor directory.
+    return False
 
 
 def ensure_dependencies() -> Tuple[bool, str]:
@@ -79,12 +54,7 @@ def ensure_dependencies() -> Tuple[bool, str]:
     has_can, has_canopen, has_robstride = have_modules()
     if has_can and has_canopen:
         return True, "ready"
-    # Try installing if wheels are bundled
-    if install_from_wheels():
-        add_vendor_to_path()
-        has_can, has_canopen, has_robstride = have_modules()
-        if has_can and has_canopen:
-            return True, "installed"
+    # In Extensions, we do not install at runtime. Report status only.
     status = []
     status.append("python-can" if has_can else "missing python-can")
     status.append("canopen" if has_canopen else "missing canopen")

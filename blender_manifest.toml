@@ -1,0 +1,24 @@
+schema_version = "1.0.0"
+
+id = "n2048.robstride_can_controller"
+version = "0.1.0"
+name = "RobStride CAN Controller"
+tagline = "Scan, map, and drive RobStride nodes over CAN"
+type = "add-on"
+maintainer = "N2048"
+website = "https://github.com/n2048/blender-robstride"
+license = "GPL-3.0-or-later"
+blender_version_min = "4.2.0"
+tags = ["System", "Animation", "Hardware"]
+
+[permissions]
+files = "Save/load JSON configs chosen by the user"
+network = "Access local CAN interfaces via python-can/socketcan"
+
+[build]
+entry = "robstride_can_controller"
+paths = [
+  "robstride_can_controller",
+  "README.md",
+  "LICENSE",
+]
