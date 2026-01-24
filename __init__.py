@@ -274,6 +274,16 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
         description="Radians offset (additive) if needed. Typically 0.0.",
         default=0.0,
     )
+    min_value: FloatProperty(
+        name="Min Value",
+        description="Minimum motor command value after scale/offset are applied",
+        default=-1_000_000.0,
+    )
+    max_value: FloatProperty(
+        name="Max Value",
+        description="Maximum motor command value after scale/offset are applied",
+        default=1_000_000.0,
+    )
 
 
 class ROBSTRIDE_OT_scan(bpy.types.Operator):
@@ -717,6 +727,8 @@ class ROBSTRIDE_OT_save_config(bpy.types.Operator):
                 "transform": node.transform,
                 "scale": float(node.scale),
                 "offset": float(node.offset),
+                "min_value": float(node.min_value),
+                "max_value": float(node.max_value),
             })
 
         try:
@@ -779,6 +791,8 @@ class ROBSTRIDE_OT_load_config(bpy.types.Operator):
                 n.transform = "ROT_Z"
             n.scale = float(m.get("scale", 1.0))
             n.offset = float(m.get("offset", 0.0))
+            n.min_value = float(m.get("min_value", -1_000_000.0))
+            n.max_value = float(m.get("max_value", 1_000_000.0))
             # Default loaded nodes to disabled until user enables explicitly
             try:
                 _enabled_state[int(n.node_id)] = False
@@ -931,6 +945,20 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             grid = box.grid_flow(columns=2, even_columns=True, even_rows=True)
             grid.prop(node, "scale")
             grid.prop(node, "offset")
+            grid.prop(node, "min_value")
+            grid.prop(node, "max_value")
+
+            io_row = box.row(align=True)
+            try:
+                last_out = _last_out.get(int(node.node_id))
+            except Exception:
+                last_out = None
+            try:
+                last_in = _last_in.get(int(node.node_id))
+            except Exception:
+                last_in = None
+            io_row.label(text=f"Last Sent: {_fmt_val(last_out)}", icon='EXPORT')
+            io_row.label(text=f"Last Recv: {_fmt_val(last_in)}", icon='IMPORT')
 
             # Show constraint limits and whether clamping is currently active
             try:
@@ -980,6 +1008,7 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
 
 # Cache last-sent outputs to reduce bus traffic
 _last_out = {}
+_last_in = {}
 _last_mode = {}
 _enabled_state = {}
 _simulated_pos = {}
@@ -1036,6 +1065,16 @@ def _fmt_deg(val: float) -> str:
         return "+∞" if d > 0 else "-∞" if d < 0 else "nan"
     except Exception:
         return "?"
+
+
+def _fmt_val(val):
+    try:
+        v = float(val)
+        if math.isfinite(v):
+            return f"{v:.4f}"
+        return "+inf" if v > 0 else "-inf" if v < 0 else "nan"
+    except Exception:
+        return "-"
 
 
 def _replace_transform_keyframe(obj, data_path, index, frame):
@@ -1232,6 +1271,26 @@ def _clamp_rot_to_limits(obj, axis, rad_val):
     return rad_val
 
 
+def _clamp_node_units(node, value):
+    """Clamp motor command value to per-node min/max limits."""
+    try:
+        vmin = float(getattr(node, "min_value", float("-inf")))
+        vmax = float(getattr(node, "max_value", float("inf")))
+    except Exception:
+        return value
+    if not math.isfinite(vmin):
+        vmin = float("-inf")
+    if not math.isfinite(vmax):
+        vmax = float("inf")
+    if vmin > vmax:
+        vmin, vmax = vmax, vmin
+    if value < vmin:
+        return vmin
+    if value > vmax:
+        return vmax
+    return value
+
+
 def _robstride_learn_timer():
     global _timer_enabled
     global _learn_enforced
@@ -1279,6 +1338,7 @@ def _robstride_learn_timer():
                     val_eval = _unwrap_update(int(node.node_id), float(val_eval))
                     val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
                 node_units = node.scale * float(val_eval) + node.offset
+                node_units = _clamp_node_units(node, float(node_units))
                 prev = _last_out.get(int(node.node_id))
                 if prev is None or abs(prev - node_units) > 1e-6:
                     if _is_simulated_node(node):
@@ -1343,6 +1403,10 @@ def _robstride_learn_timer():
                     pos = robstride_can.manager.get_cached_position(node.node_id)
                 if pos is None:
                     continue
+                try:
+                    _last_in[int(node.node_id)] = float(pos)
+                except Exception:
+                    pass
                 kind, axis = _transform_spec(node.transform)
                 val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
                 if kind == "ROT":
@@ -1414,6 +1478,10 @@ def _robstride_learn_timer():
                 pos = robstride_can.manager.get_cached_position(node.node_id)
             if pos is None:
                 continue
+            try:
+                _last_in[int(node.node_id)] = float(pos)
+            except Exception:
+                pass
             kind, axis = _transform_spec(node.transform)
             val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
             if kind == "ROT":
@@ -1457,6 +1525,7 @@ def _robstride_learn_timer():
                 val_eval = _unwrap_update(int(node.node_id), float(val_eval))
                 val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
             node_units = node.scale * float(val_eval) + node.offset
+            node_units = _clamp_node_units(node, float(node_units))
             prev = _last_out.get(int(node.node_id))
             if prev is None or abs(prev - node_units) > 1e-6:
                 if _is_simulated_node(node):
@@ -1583,6 +1652,7 @@ def robstride_sync_handler(scene,depsgraph=None):
                 val_eval = _unwrap_update(int(node_id), float(val_eval))
                 val_eval = _clamp_rot_to_limits(obj, axis, float(val_eval))
             node_units = node.scale * float(val_eval) + node.offset
+            node_units = _clamp_node_units(node, float(node_units))
 
             # Send synchronously per frame to mirror move.py timing
             enabled = _enabled_state.get(int(node_id))
@@ -1606,6 +1676,10 @@ def robstride_sync_handler(scene,depsgraph=None):
             if pos is None:
                 # Skip this frame if not ready to avoid blocking and FPS drops
                 continue
+            try:
+                _last_in[int(node_id)] = float(pos)
+            except Exception:
+                pass
 
             # node units -> value
             val_raw = (pos - node.offset) / node.scale if node.scale != 0.0 else 0.0
