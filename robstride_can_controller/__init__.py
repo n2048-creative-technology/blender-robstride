@@ -243,6 +243,7 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
     node_id: IntProperty(name="ID", default=0, min=0)
     object_ref: PointerProperty(name="Object", type=bpy.types.Object, update=_on_node_object_update)
     is_simulated: BoolProperty(name="Simulated", default=False)
+    ui_expanded: BoolProperty(name="Expanded", default=True)
     mode: EnumProperty(
         name="Mode",
         items=[
@@ -284,6 +285,81 @@ class RobStridenodeNode(bpy.types.PropertyGroup):
         description="Maximum motor command value after scale/offset are applied",
         default=1_000_000.0,
     )
+
+
+class ROBSTRIDE_UL_nodes(bpy.types.UIList):
+    bl_idname = "ROBSTRIDE_UL_nodes"
+
+    def draw_item(self, _context, layout, _data, item, _icon, _active_data, _active_propname, _index):
+        node = item
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            exp_icon = 'TRIA_DOWN' if getattr(node, "ui_expanded", True) else 'TRIA_RIGHT'
+            row.prop(node, "ui_expanded", text="", icon=exp_icon, emboss=False)
+            row.prop(node, "name", text="", emboss=False)
+            row.label(text=f"ID {node.node_id}")
+            try:
+                online = robstride_can.manager.node_status(node.node_id)
+            except Exception:
+                online = False
+            row.label(text="", icon=('CHECKMARK' if online else 'ERROR'))
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='DRIVER')
+
+
+class ROBSTRIDE_OT_node_move(bpy.types.Operator):
+    bl_idname = "robstride.node_move"
+    bl_label = "Move Node"
+    bl_description = "Move the selected node in the list"
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: EnumProperty(items=[("UP", "Up", ""), ("DOWN", "Down", "")], default="UP")
+
+    def execute(self, context):
+        scene = context.scene
+        nodes = scene.robstride_nodes
+        idx = int(getattr(scene, "robstride_nodes_index", 0))
+        if not nodes or idx < 0 or idx >= len(nodes):
+            return {'CANCELLED'}
+        new_idx = idx - 1 if self.direction == "UP" else idx + 1
+        new_idx = max(0, min(new_idx, len(nodes) - 1))
+        if new_idx != idx:
+            nodes.move(idx, new_idx)
+            scene.robstride_nodes_index = new_idx
+        return {'FINISHED'}
+
+
+class ROBSTRIDE_OT_nodes_expand_all(bpy.types.Operator):
+    bl_idname = "robstride.nodes_expand_all"
+    bl_label = "Expand All Nodes"
+    bl_description = "Expand all nodes in the list"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        for node in scene.robstride_nodes:
+            try:
+                node.ui_expanded = True
+            except Exception:
+                pass
+        return {'FINISHED'}
+
+
+class ROBSTRIDE_OT_nodes_collapse_all(bpy.types.Operator):
+    bl_idname = "robstride.nodes_collapse_all"
+    bl_label = "Collapse All Nodes"
+    bl_description = "Collapse all nodes in the list"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        for node in scene.robstride_nodes:
+            try:
+                node.ui_expanded = False
+            except Exception:
+                pass
+        return {'FINISHED'}
 
 
 class ROBSTRIDE_OT_scan(bpy.types.Operator):
@@ -881,9 +957,32 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
         except Exception:
             learn_by_object = {}
 
+        # Node list with drag reordering + active selection
+        list_row = layout.row(align=True)
+        list_rows = min(6, max(3, len(scene.robstride_nodes)))
+        list_row.template_list(
+            "ROBSTRIDE_UL_nodes",
+            "",
+            scene,
+            "robstride_nodes",
+            scene,
+            "robstride_nodes_index",
+            rows=list_rows,
+        )
+        list_col = list_row.column(align=True)
+        move_up = list_col.operator("robstride.node_move", text="", icon='TRIA_UP')
+        move_up.direction = "UP"
+        move_down = list_col.operator("robstride.node_move", text="", icon='TRIA_DOWN')
+        move_down.direction = "DOWN"
+        list_col.separator()
+        list_col.operator("robstride.nodes_expand_all", text="", icon='TRIA_DOWN')
+        list_col.operator("robstride.nodes_collapse_all", text="", icon='TRIA_RIGHT')
+
         for idx, node in enumerate(scene.robstride_nodes):
             box = layout.box()
             header = box.row(align=True)
+            exp_icon = 'TRIA_DOWN' if getattr(node, "ui_expanded", True) else 'TRIA_RIGHT'
+            header.prop(node, "ui_expanded", text="", icon=exp_icon, emboss=False)
             header.prop(node, "name", text="Name")
             online = robstride_can.manager.node_status(node.node_id)
             online_icon = 'CHECKMARK' if online else 'ERROR'
@@ -903,6 +1002,9 @@ class ROBSTRIDE_PT_panel(bpy.types.Panel):
             en_icon = 'PLAY' if (en_state and node.mode != 'LEARN') else 'PAUSE'
             en_text = 'Enabled' if (en_state and node.mode != 'LEARN') else 'Disabled'
             header.label(text=en_text, icon=en_icon)
+
+            if not getattr(node, "ui_expanded", True):
+                continue
 
             col = box.column(align=True)
             col.prop(node, "object_ref")
@@ -1697,6 +1799,10 @@ def robstride_sync_handler(scene,depsgraph=None):
 classes = (
     RobStrideAddonPreferences,
     RobStridenodeNode,
+    ROBSTRIDE_UL_nodes,
+    ROBSTRIDE_OT_node_move,
+    ROBSTRIDE_OT_nodes_expand_all,
+    ROBSTRIDE_OT_nodes_collapse_all,
     ROBSTRIDE_OT_scan,
     ROBSTRIDE_OT_connect_toggle,
     ROBSTRIDE_OT_node_enable,
@@ -1715,6 +1821,11 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.robstride_nodes = CollectionProperty(type=RobStridenodeNode)
+    bpy.types.Scene.robstride_nodes_index = IntProperty(
+        name="Active Node Index",
+        default=0,
+        min=0,
+    )
     bpy.types.Scene.robstride_show_simulated = BoolProperty(
         name="Show Simulated Nodes",
         description="Show 2 simulated nodes when CAN is disconnected",
@@ -1750,6 +1861,7 @@ def unregister():
 
     del bpy.types.Scene.robstride_show_simulated
     del bpy.types.Scene.robstride_nodes
+    del bpy.types.Scene.robstride_nodes_index
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

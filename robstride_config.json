@@ -1,0 +1,53 @@
+{
+  "can": {
+    "interface": "socketcan",
+    "channel": "can0",
+    "bitrate": 1000000
+  },
+  "nodes": [
+    {
+      "id": 4,
+      "name": "Node 4",
+      "object": "Cube.004",
+      "mode": "RUN",
+      "transform": "ROT_Z",
+      "scale": -1.0,
+      "offset": 0.0,
+      "min_value": -1000000.0,
+      "max_value": 1000000.0
+    },
+    {
+      "id": 3,
+      "name": "Node 3",
+      "object": "Cube.003",
+      "mode": "RUN",
+      "transform": "ROT_Z",
+      "scale": 1.0,
+      "offset": -8.309999465942383,
+      "min_value": -1000000.0,
+      "max_value": 1000000.0
+    },
+    {
+      "id": 1,
+      "name": "Node 1",
+      "object": "Cube.001",
+      "mode": "RUN",
+      "transform": "ROT_Z",
+      "scale": -1.0,
+      "offset": 0.0,
+      "min_value": -1000000.0,
+      "max_value": 1000000.0
+    },
+    {
+      "id": 2,
+      "name": "Node 2",
+      "object": "Cube.002",
+      "mode": "RUN",
+      "transform": "ROT_Z",
+      "scale": 1.0,
+      "offset": 0.0,
+      "min_value": 0.0,
+      "max_value": 15000.0
+    }
+  ]
+}
