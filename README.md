@@ -1,5 +1,28 @@
 RobStride Blender Add-on
 
+LINEAGE NOTE: This is the current/most advanced repo in the CAN-bus branch of
+this account's hardware-sync add-ons for Blender. It is a parallel/sister
+effort to [blender-esp32-robstride](https://github.com/n2048-creative-technology/blender-esp32-robstride),
+which drives RobStride actuators via an ESP32 bridging serial-to-CAN rather
+than talking CAN directly from the host machine. The two are not strict
+supersession of one another — pick this repo if your host machine has a
+native CAN interface (e.g. `can0` via a USB-CAN adapter or SocketCAN), or
+blender-esp32-robstride if you want a serial link to an ESP32 that talks CAN
+on your behalf. Both are also related in spirit (hardware actuator sync
+driven by Blender animation) to the separate, currently-unimplemented
+[blender-net](https://github.com/n2048-creative-technology/blender-net)
+concept, which proposed doing the same thing over WiFi instead of CAN/serial.
+
+LICENSE NOTE: GitHub reports this repo's license as "Other" because the
+committed `LICENSE` file is a short, non-standard-template text rather than
+the full canonical license boilerplate GitHub's detector matches against.
+The terms it states, and the terms declared in `blender_manifest.toml`
+(`license = "GPL-3.0-or-later"`), are consistent: this project is licensed
+GPL-3.0-or-later. The `LICENSE` file's wording has been left as-is per this
+review's instructions (not silently replaced with different terms) — if you
+want GitHub to auto-detect it as GPL-3.0, replace `LICENSE` with the full
+canonical GPL-3.0 text from https://www.gnu.org/licenses/gpl-3.0.txt.
+
 ```
 sudo ip link set can0 type can bitrate 1000000 loopback off
 sudo ip link set can0 up
